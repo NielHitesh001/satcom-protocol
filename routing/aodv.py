@@ -201,7 +201,6 @@ class AODVProtocol(RoutingProtocol):
             if nh:
                 self._control_sent += 1
                 self.outbound.append(Outbound(node=node, packet=rrep, next_hop=nh))
-                self.record_event(time_s, "discovery_end", origin, node, "RREP generated")
             return None
 
         if packet.ttl > 1:
