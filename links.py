@@ -144,17 +144,26 @@ def compute_snapshot(
             pairs = _candidate_pairs_spatial(sat_names, sat_positions, params.max_range_km)
         else:
             pairs = _candidate_pairs_bruteforce(sat_names, sat_positions)
+        candidates: List[Tuple[float, str, str]] = []
         for u, v in pairs:
             p1, p2 = sat_positions[u], sat_positions[v]
             dist = float(np.linalg.norm(p2 - p1))
-            if dist > params.max_range_km:
-                continue
-            if not los_clear(p1, p2):
+            if dist <= params.max_range_km and los_clear(p1, p2):
+                candidates.append((dist, u, v))
+
+        # A satellite has a finite number of steerable ISL terminals.  When a
+        # degree cap is configured, retain the shortest feasible links first.
+        degree: Dict[str, int] = defaultdict(int)
+        degree_cap = params.max_isl_degree
+        for dist, u, v in sorted(candidates):
+            if degree_cap is not None and (degree[u] >= degree_cap or degree[v] >= degree_cap):
                 continue
             delay = dist / C_LIGHT_KM_S
             edges.append(LinkEdge(u, v, delay, params.capacity_mbps, dist))
             adj[u].add(v)
             adj[v].add(u)
+            degree[u] += 1
+            degree[v] += 1
 
     if include_ground_sat:
         for g in gnd_names:
