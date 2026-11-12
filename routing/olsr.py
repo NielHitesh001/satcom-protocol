@@ -5,6 +5,7 @@ Core ideas kept:
   - Periodic HELLO for neighbor sensing
   - Topology Control (TC) messages for MPR flooding (simplified: full flood)
   - Dijkstra shortest-path computation from the local topology view
+  - TC duplicate detection to bound control overhead
 
 Not a full RFC 3626 implementation; MPR selection is omitted for clarity.
 """
@@ -33,11 +34,12 @@ class OLSRProtocol(RoutingProtocol):
         self.hold_time_s = hold_time_s
 
         self.neighbors: Dict[str, Set[str]] = {n: set() for n in nodes}
-        # topology: node -> set of neighbors reported by that node
         self.topology: Dict[str, Dict[str, Set[str]]] = {n: {} for n in nodes}
-        self.routing_table: Dict[str, Dict[str, str]] = {n: {} for n in nodes}  # dest -> next_hop
+        self.routing_table: Dict[str, Dict[str, str]] = {n: {} for n in nodes}
         self.last_hello: Dict[str, float] = {n: -1e9 for n in nodes}
         self.last_tc: Dict[str, float] = {n: -1e9 for n in nodes}
+        self.seen_tc: Dict[str, Set[Tuple[str, int]]] = {n: set() for n in nodes}
+        self._tc_seq: Dict[str, int] = {n: 0 for n in nodes}
         self._pkt_counter = 0
 
     def _new_pkt_id(self) -> int:
@@ -51,7 +53,6 @@ class OLSRProtocol(RoutingProtocol):
         else:
             self.neighbors[u].discard(v)
             self.neighbors[v].discard(u)
-        # Recompute routes for both endpoints
         self._recompute(u)
         self._recompute(v)
 
@@ -77,11 +78,15 @@ class OLSRProtocol(RoutingProtocol):
 
         if packet.type == PacketType.TC:
             self._control_recv += 1
-            origin = packet.src
+            origin = packet.payload.get("origin", packet.src)
+            seq = packet.payload.get("seq", 0)
+            key = (origin, seq)
+            if key in self.seen_tc[node]:
+                return None
+            self.seen_tc[node].add(key)
             reported = set(packet.payload.get("neighbors", []))
             self.topology[node][origin] = reported
             self._recompute(node)
-            # Flood further (simplified)
             if packet.ttl > 1:
                 packet.ttl -= 1
                 self._control_sent += max(0, len(self.neighbors[node]) - 1)
@@ -91,7 +96,6 @@ class OLSRProtocol(RoutingProtocol):
         return None
 
     def tick(self, time_s: float, node: str) -> List[Packet]:
-        """Called periodically by the engine to emit HELLO / TC."""
         out: List[Packet] = []
         if time_s - self.last_hello[node] >= self.hello_interval_s:
             self.last_hello[node] = time_s
@@ -105,11 +109,13 @@ class OLSRProtocol(RoutingProtocol):
                 ttl=1,
                 payload={"neighbors": list(self.neighbors[node])},
             )
-            self._control_sent += len(self.neighbors[node])
+            self._control_sent += max(1, len(self.neighbors[node]))
             out.append(pkt)
 
         if time_s - self.last_tc[node] >= self.tc_interval_s:
             self.last_tc[node] = time_s
+            self._tc_seq[node] += 1
+            seq = self._tc_seq[node]
             pkt = Packet(
                 pkt_id=self._new_pkt_id(),
                 src=node,
@@ -117,16 +123,18 @@ class OLSRProtocol(RoutingProtocol):
                 type=PacketType.TC,
                 size_bytes=64,
                 creation_time_s=time_s,
-                ttl=15,
-                payload={"neighbors": list(self.neighbors[node])},
+                ttl=8,
+                payload={
+                    "origin": node,
+                    "seq": seq,
+                    "neighbors": list(self.neighbors[node]),
+                },
             )
-            self._control_sent += len(self.neighbors[node])
+            self._control_sent += max(1, len(self.neighbors[node]))
             out.append(pkt)
         return out
 
     def _recompute(self, node: str) -> None:
-        """Dijkstra on the local topology view."""
-        # Build undirected graph from neighbor + topology info
         graph: Dict[str, Set[str]] = defaultdict(set)
         for n in self.neighbors[node]:
             graph[node].add(n)
@@ -136,7 +144,6 @@ class OLSRProtocol(RoutingProtocol):
                 graph[origin].add(m)
                 graph[m].add(origin)
 
-        # Dijkstra
         dist = {node: 0}
         prev: Dict[str, str] = {}
         pq = [(0, node)]
@@ -153,12 +160,10 @@ class OLSRProtocol(RoutingProtocol):
                     prev[v] = u
                     heapq.heappush(pq, (nd, v))
 
-        # Next hops
         table: Dict[str, str] = {}
         for dest in dist:
             if dest == node:
                 continue
-            # Walk back to find the first hop
             cur = dest
             while prev.get(cur) != node and cur in prev:
                 cur = prev[cur]
@@ -167,6 +172,5 @@ class OLSRProtocol(RoutingProtocol):
         self.routing_table[node] = table
 
     def state_size(self, node: str) -> int:
-        # neighbors + topology entries + routing table
         topo_bytes = sum(len(s) * 8 for s in self.topology[node].values())
         return len(self.neighbors[node]) * 16 + topo_bytes + len(self.routing_table[node]) * 24 + 128
