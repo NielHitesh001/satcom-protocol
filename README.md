@@ -49,8 +49,8 @@ All three implement the same interface (`on_link_change`, `on_packet`, `next_hop
 
 | Protocol | Style | What it does |
 |----------|--------|--------------|
-| **AODV** (simplified) | On-demand | RREQ flooding, RREP, sequence numbers, route expiry, RERR on link break. Not a full RFC 3561 implementation. |
-| **OLSR** (simplified) | Proactive | Periodic HELLO + TC, Dijkstra on the local topology view. MPR selection omitted. Not a full RFC 3626 implementation. |
+| **AODV** (simplified) | On-demand | RREQ flooding, RREP, sequence numbers, route expiry, RERR on link break, DATA buffering during discovery. Not a full RFC 3561 implementation. |
+| **OLSR** (simplified) | Proactive | Periodic HELLO + TC (with duplicate suppression), Dijkstra on the local topology view. MPR selection omitted. Not a full RFC 3626 implementation. |
 | **Predictive** | Oracle baseline | Precomputes shortest-path next hops from the known future topology snapshots. Zero control traffic. |
 
 ### Predictive protocol (design note)
@@ -71,16 +71,16 @@ It is a *lower-bound reference*, not a candidate on-board algorithm. It answers:
 
 ## Example results
 
-Scenario: `scenarios/example.yaml` (20 sats, 300 s, seed 42, sat-to-sat flows).  
+Scenario: `scenarios/example.yaml` (15 sats, 180 s, seed 42, sat-to-sat flows on a connected component).  
 **These numbers are relative to the simplified protocol implementations above.**
 
-| Protocol    | Sent | Delivered | Delivery ratio | Mean latency (s) | Control msgs | Peak state (bytes) |
-|-------------|-----:|----------:|---------------:|-----------------:|-------------:|-------------------:|
-| predictive  |  154 |        53 |          0.344 |           229.4  |            0 |               5888 |
-| olsr        |  154 |         0 |          0.000 |             0.0  |         3916 |               9744 |
-| aodv        |  154 |         0 |          0.000 |             0.0  |            6 |               1472 |
+| Protocol   | Sent | Delivered | Delivery ratio | Mean latency (s) | Control msgs | Peak state (bytes) |
+|------------|-----:|----------:|---------------:|-----------------:|-------------:|-------------------:|
+| predictive |   39 |        39 |          1.000 |             6.3  |            0 |               4608 |
+| aodv       |   39 |        39 |          1.000 |             6.3  |          178 |               4592 |
+| olsr       |   39 |        39 |          1.000 |             6.3  |         9048 |              14688 |
 
-AODV and OLSR currently fail to deliver in this short run because the simplified discovery/flooding loop does not yet fully close multi-hop routes inside the discrete-event engine. Closing that gap is the main protocol work item.
+All three deliver fully on this connected scenario. Predictive and AODV have similar latency; OLSR pays more in control overhead (proactive TC flood). AODV discovery buffers DATA and completes multi-hop RREQ/RREP within a time step.
 
 ## Scenario file
 
