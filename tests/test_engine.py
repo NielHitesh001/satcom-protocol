@@ -42,8 +42,8 @@ MINIMAL_SCENARIO = {
     "traffic": [
         {
             "flow_id": "f1",
-            "source": "STARLINK-1007",
-            "destination": "STARLINK-1010",
+            "source": "STARLINK-1008",
+            "destination": "STARLINK-1020",
             "start_s": 5,
             "duration_s": 40,
             "rate_pps": 0.5,
