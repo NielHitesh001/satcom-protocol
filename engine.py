@@ -250,9 +250,9 @@ class Simulator:
         for n in self.node_names:
             old = self._prev_adj.get(n, set())
             new = snap.adj.get(n, set())
-            for lost in old - new:
+            for lost in sorted(old - new):
                 self.protocol.on_link_change(t, n, lost, up=False)
-            for gained in new - old:
+            for gained in sorted(new - old):
                 self.protocol.on_link_change(t, n, gained, up=True)
         self._prev_adj = {n: set(snap.adj.get(n, set())) for n in self.node_names}
         if isinstance(self.protocol, PracticalPredictiveProtocol):
@@ -351,7 +351,7 @@ class Simulator:
         loss_p = float(self.scenario.link.loss_prob)
 
         if nh == "__broadcast__":
-            for neigh in snap.adj.get(src, []):
+            for neigh in sorted(snap.adj.get(src, [])):
                 if loss_p > 0 and self.rng.random() < loss_p:
                     if pkt.type == PacketType.DATA:
                         fid = self._flow_id_for(pkt)
