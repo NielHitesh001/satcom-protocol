@@ -17,6 +17,7 @@ Assumptions
 -----------
 - TLEs are NORAD two-line element sets (with optional name line)
 - Propagation uses the sgp4 library (Wertz / Vallado model)
+- SGP4 output is TEME; converted to ECEF via GMST rotation about Z
 - Positions returned in Earth-Centered Earth-Fixed (ECEF) km
 """
 
@@ -101,6 +102,42 @@ def load_tles(
     return sats
 
 
+def gmst_rad(jd: float, fr: float = 0.0) -> float:
+    """
+    Greenwich Mean Sidereal Time (radians) from Julian date.
+
+    Uses the IAU / Vallado polynomial. Sufficient for LEO link geometry
+    (sub-arcminute for the epochs we care about).
+    """
+    T = ((jd - 2451545.0) + fr) / 36525.0
+    # seconds of GMST
+    gmst_sec = (
+        67310.54841
+        + (876600.0 * 3600.0 + 8640184.812866) * T
+        + 0.093104 * T * T
+        - 6.2e-6 * T * T * T
+    )
+    gmst_deg = (gmst_sec / 240.0) % 360.0
+    return float(np.radians(gmst_deg))
+
+
+def teme_to_ecef(r_teme: np.ndarray, jd: float, fr: float) -> np.ndarray:
+    """
+    Rotate a TEME position vector into ECEF by the GMST angle about Z.
+
+    SGP4 returns True Equator Mean Equinox (TEME). Ground sites and
+    elevation/LOS checks require Earth-fixed (ECEF) coordinates.
+    Omitting this rotation produces position errors of thousands of km
+    within a few hours and completely corrupts ground-satellite visibility.
+    """
+    theta = gmst_rad(jd, fr)
+    c, s = np.cos(theta), np.sin(theta)
+    x = c * r_teme[0] + s * r_teme[1]
+    y = -s * r_teme[0] + c * r_teme[1]
+    z = r_teme[2]
+    return np.array([x, y, z], dtype=np.float64)
+
+
 def propagate_positions(
     sats: Dict[str, SatelliteState],
     times_utc: List[datetime],
@@ -111,6 +148,11 @@ def propagate_positions(
     Returns
     -------
     dict name -> (N, 3) array of ECEF positions in kilometres
+
+    Notes
+    -----
+    SGP4 yields TEME; we convert to ECEF via GMST rotation so that
+    ground-site geometry (elevation, LOS) is consistent.
     """
     result: Dict[str, np.ndarray] = {}
     n = len(times_utc)
@@ -124,9 +166,7 @@ def propagate_positions(
             )
             e, r, v = state.satrec.sgp4(jd, fr)
             if e == 0:
-                # SGP4 returns TEME; for v1 we treat it as approximately ECEF
-                # (error is acceptable for link geometry at this fidelity)
-                pos[i] = r
+                pos[i] = teme_to_ecef(np.asarray(r, dtype=np.float64), jd, fr)
             else:
                 pos[i] = np.nan
         result[name] = pos

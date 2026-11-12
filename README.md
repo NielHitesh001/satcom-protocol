@@ -31,7 +31,7 @@ print(metrics.summary_dict())
 ```
 .
   config.py          Scenario loading
-  orbit.py           TLE + SGP4 propagation
+  orbit.py           TLE + SGP4 propagation (TEME→ECEF via GMST)
   links.py           Visibility / range / elevation graph
   routing/           AODV, OLSR, predictive
   traffic.py         Flow generation
@@ -62,10 +62,11 @@ Each run writes:
 
 ## Notes / limitations (v0.1)
 
-- AODV and OLSR are simplified (not full RFC implementations).
-- SGP4 TEME positions are used directly as approximate ECEF; sufficient for topology trends.
+- AODV and OLSR are simplified (not full RFC implementations). Results should be read as relative to these simplified baselines, not as RFC-faithful protocol comparisons.
+- SGP4 returns TEME; positions are rotated into ECEF with a GMST (IAU/Vallado) approximation so ground-site elevation and LOS are consistent. Polar motion and nutation are omitted.
 - Full Starlink constellation (thousands of sats) is expensive; start with `max_sats`.
 - No physical-layer coding or attitude dynamics.
+- The predictive protocol is an oracle that precomputes shortest paths from the known future topology snapshots. It is a lower-bound reference, not an on-board algorithm.
 
 ## Validation
 
@@ -73,4 +74,4 @@ Each run writes:
 pytest tests/ -q
 ```
 
-Geometry tests cover LOS, elevation and coordinate conversion.
+Geometry tests cover LOS, elevation, coordinate conversion, and TEME→ECEF rotation. Routing and engine tests are still thin.
