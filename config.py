@@ -1,20 +1,5 @@
 """
 config.py – Load and validate scenario files (YAML / JSON).
-
-Inputs
-------
-Path to a scenario file describing:
-  - simulation time window and step
-  - ground sites
-  - traffic flows
-  - link parameters
-  - protocol choice
-  - random seed
-  - TLE snapshot path / identifier
-
-Outputs
--------
-A validated Scenario dataclass used by the rest of the simulator.
 """
 
 from __future__ import annotations
@@ -38,11 +23,11 @@ class GroundSite:
 @dataclass
 class TrafficFlow:
     flow_id: str
-    source: str          # node name (sat or ground)
+    source: str
     destination: str
-    start_s: float       # relative to sim start
+    start_s: float
     duration_s: float
-    rate_pps: float      # packets per second
+    rate_pps: float
     packet_size_bytes: int = 512
 
 
@@ -51,14 +36,14 @@ class LinkParams:
     max_range_km: float = 5000.0
     min_elevation_deg: float = 25.0
     capacity_mbps: float = 100.0
-    loss_prob: float = 0.0          # off by default
-    # Simple capacity model; can be extended later
+    loss_prob: float = 0.0
+    queue_limit: int = 64
 
 
 @dataclass
 class Scenario:
     name: str
-    start_time_utc: str              # ISO-8601 or epoch string
+    start_time_utc: str
     duration_s: float
     time_step_s: float
     tle_path: str
@@ -66,9 +51,8 @@ class Scenario:
     ground_sites: List[GroundSite]
     traffic: List[TrafficFlow]
     link: LinkParams
-    protocol: str                    # "aodv" | "olsr" | "predictive"
+    protocol: str
     seed: int = 42
-    # Optional subset of satellites to keep runtime small
     sat_subset: Optional[List[str]] = None
     max_sats: Optional[int] = 50
 
@@ -95,7 +79,6 @@ class Scenario:
 
 
 def load_scenario(path: str | Path) -> Scenario:
-    """Load a YAML or JSON scenario file and return a Scenario object."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
     if path.suffix.lower() in {".yaml", ".yml"}:

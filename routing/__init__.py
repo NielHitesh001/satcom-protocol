@@ -4,6 +4,7 @@ from .base import RoutingProtocol, Packet, RouteEvent
 from .aodv import AODVProtocol
 from .olsr import OLSRProtocol
 from .predictive import PredictiveProtocol
+from .practical_predictive import PracticalPredictiveProtocol
 
 __all__ = [
     "RoutingProtocol",
@@ -12,4 +13,5 @@ __all__ = [
     "AODVProtocol",
     "OLSRProtocol",
     "PredictiveProtocol",
+    "PracticalPredictiveProtocol",
 ]
