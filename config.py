@@ -39,6 +39,7 @@ class LinkParams:
     capacity_mbps: float = 100.0
     loss_prob: float = 0.0
     queue_limit: int = 64
+    max_isl_degree: Optional[int] = None
 
 
 @dataclass
