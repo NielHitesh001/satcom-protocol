@@ -39,6 +39,7 @@ print(metrics.summary_dict())
   analysis.py        Plots
   scenarios/         Example YAML
   data/              Sample TLEs
+  scripts/           fetch_tles.py (live CelesTrak pull)
   tests/             Geometry, routing, and engine tests
   run_example.py     Run all three protocols on the example scenario
 ```
@@ -49,8 +50,8 @@ All three implement the same interface (`on_link_change`, `on_packet`, `next_hop
 
 | Protocol | Style | What it does |
 |----------|--------|--------------|
-| **AODV** (simplified) | On-demand | RREQ flooding, RREP, sequence numbers, route expiry, RERR on link break, DATA buffering during discovery. Not a full RFC 3561 implementation. |
-| **OLSR** (simplified) | Proactive | Periodic HELLO + TC (with duplicate suppression), Dijkstra on the local topology view. MPR selection omitted. Not a full RFC 3626 implementation. |
+| **AODV** (simplified) | On-demand | RREQ flooding, RREP, DATA buffering during discovery, sequence numbers, route expiry. Not a full RFC 3561 implementation. |
+| **OLSR** (simplified) | Proactive | Periodic HELLO + TC, greedy MPR (2-hop cover), TC retransmit only by MPR selectors. Not a full RFC 3626 implementation. |
 | **Predictive** | Oracle baseline | Precomputes shortest-path next hops from the known future topology snapshots. Zero control traffic. |
 
 ### Predictive protocol (design note)
@@ -74,13 +75,21 @@ It is a *lower-bound reference*, not a candidate on-board algorithm. It answers:
 Scenario: `scenarios/example.yaml` (15 sats, 180 s, seed 42, sat-to-sat flows on a connected component).  
 **These numbers are relative to the simplified protocol implementations above.**
 
-| Protocol   | Sent | Delivered | Delivery ratio | Mean latency (s) | Control msgs | Peak state (bytes) |
+| Protocol   | Sent | Delivered | Delivery ratio | Mean latency (s) | Control msgs | Mean discovery (s) |
 |------------|-----:|----------:|---------------:|-----------------:|-------------:|-------------------:|
-| predictive |   39 |        39 |          1.000 |             6.3  |            0 |               4608 |
-| aodv       |   39 |        39 |          1.000 |             6.3  |          178 |               4592 |
-| olsr       |   39 |        39 |          1.000 |             6.3  |         9048 |              14688 |
+| predictive |   39 |        39 |          1.000 |             6.3  |            0 |                —   |
+| aodv       |   39 |        39 |          1.000 |             6.3  |          178 |               0.0  |
+| olsr       |   39 |        35 |          0.897 |             6.4  |         4818 |                —   |
 
-All three deliver fully on this connected scenario. Predictive and AODV have similar latency; OLSR pays more in control overhead (proactive TC flood). AODV discovery buffers DATA and completes multi-hop RREQ/RREP within a time step.
+Predictive and AODV deliver fully. OLSR is slightly below 100% because MPR selection needs a HELLO exchange before TC retransmits; early packets can miss routes. OLSR control is still higher than AODV but ~2× lower than the pre-MPR flood. Discovery latency is 0 under the discrete same-step model (RREQ/RREP finish within one topology snapshot).
+
+### Live TLE snapshots
+
+```bash
+python scripts/fetch_tles.py --max 100 --out data/starlink_live.tle
+```
+
+Point `tle_path` in the scenario YAML at that file. Requires network access to CelesTrak.
 
 ## Scenario file
 
