@@ -124,8 +124,8 @@ class OLSRProtocol(RoutingProtocol):
                 ttl=1,
                 path=[node],
                 payload={
-                    "neighbors": list(self.neighbors[node]),
-                    "mpr": list(self.mpr[node]),
+                    "neighbors": sorted(self.neighbors[node]),
+                    "mpr": sorted(self.mpr[node]),
                 },
             )
             self._control_sent += max(1, len(self.neighbors[node]))
@@ -177,7 +177,7 @@ class OLSRProtocol(RoutingProtocol):
         while remaining:
             best = None
             best_cover: Set[str] = set()
-            for n1, c in cover.items():
+            for n1 in sorted(cover):\n                c = cover[n1]
                 if n1 in selected:
                     continue
                 hit = c & remaining
@@ -209,7 +209,7 @@ class OLSRProtocol(RoutingProtocol):
             if u in visited:
                 continue
             visited.add(u)
-            for v in graph.get(u, []):
+            for v in sorted(graph.get(u, [])):
                 nd = d + 1
                 if v not in dist or nd < dist[v]:
                     dist[v] = nd

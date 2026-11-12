@@ -53,7 +53,7 @@ class RoutingProtocol(ABC):
     """Abstract base class for all routing protocols."""
 
     def __init__(self, nodes: List[str]):
-        self.nodes = set(nodes)
+        # Stable node order prevents hash randomization from changing ties.\n        self.nodes = tuple(sorted(nodes))
         self._control_sent = 0
         self._control_recv = 0
         self.route_events: List[RouteEvent] = []

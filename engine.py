@@ -109,10 +109,13 @@ class Simulator:
 
         self.traffic_gen = TrafficGenerator(scenario.traffic, scenario.seed)
         self.traffic_events = self.traffic_gen.generate(scenario.duration_s)
+        self.metrics.workload_fingerprint = self.traffic_gen.fingerprint(self.traffic_events)
 
         self._link_free_at: Dict[Tuple[str, str], float] = {}
         self.queue_limit = int(getattr(scenario.link, "queue_limit", 64) or 64)
-        self._link_qlen: Dict[Tuple[str, str], int] = {}
+        # Per-directed-link service-completion times.  This is the queue source
+        # of truth; entries are discarded once their transmission has completed.
+        self._link_finish_times: Dict[Tuple[str, str], List[float]] = {}
 
         self._event_q: List[Event] = []
         self._prev_adj: Dict[str, set] = {n: set() for n in self.node_names}
@@ -199,12 +202,27 @@ class Simulator:
             elif ev.kind == "arrival":
                 self._handle_arrival(ev)
 
+        residual_packet_ids = set()
         while self._event_q:
             ev = heapq.heappop(self._event_q)
             if ev.kind == "arrival" and ev.packet and ev.packet.type == PacketType.DATA:
                 fid = self._flow_id_for(ev.packet)
                 if fid:
                     self.metrics.flows[fid].residual += 1
+                    residual_packet_ids.add(ev.packet.pkt_id)
+
+        # AODV DATA packets can be held locally while route discovery is pending.
+        # They are no longer scheduled arrivals, but remain part of packet
+        # conservation and must be reported as residual at the cutoff.
+        if isinstance(self.protocol, AODVProtocol):
+            for by_destination in self.protocol.buffer.values():
+                for buffered in by_destination.values():
+                    for pkt in buffered:
+                        if pkt.pkt_id not in residual_packet_ids:
+                            fid = self._flow_id_for(pkt)
+                            if fid:
+                                self.metrics.flows[fid].residual += 1
+                                residual_packet_ids.add(pkt.pkt_id)
 
         self.metrics.control_messages_sent = self.protocol.control_messages_sent()
         self.metrics.control_messages_recv = self.protocol.control_messages_received()
@@ -233,9 +251,9 @@ class Simulator:
         for n in self.node_names:
             old = self._prev_adj.get(n, set())
             new = snap.adj.get(n, set())
-            for lost in old - new:
+            for lost in sorted(old - new):
                 self.protocol.on_link_change(t, n, lost, up=False)
-            for gained in new - old:
+            for gained in sorted(new - old):
                 self.protocol.on_link_change(t, n, gained, up=True)
         self._prev_adj = {n: set(snap.adj.get(n, set())) for n in self.node_names}
         if isinstance(self.protocol, PracticalPredictiveProtocol):
@@ -309,13 +327,32 @@ class Simulator:
         for ob in self.protocol.pop_outbound():
             self._send(now, ob.node, ob.next_hop or "__broadcast__", ob.packet, snap)
 
+    def _reserve_link(
+        self, now: float, src: str, dst: str, pkt: Packet, capacity_mbps: float
+    ) -> Optional[Tuple[float, float]]:
+        """Reserve directed-link serialization capacity or reject a full DATA queue."""
+        key = (src, dst)
+        finishes = self._link_finish_times.setdefault(key, [])
+        while finishes and finishes[0] <= now:
+            heapq.heappop(finishes)
+
+        serialization_s = (pkt.size_bytes * 8.0) / (capacity_mbps * 1e6) if capacity_mbps > 0 else 0.0
+        start = max(now, self._link_free_at.get(key, now))
+        if pkt.type == PacketType.DATA and len(finishes) >= self.queue_limit:
+            return None
+
+        finish = start + serialization_s
+        heapq.heappush(finishes, finish)
+        self._link_free_at[key] = finish
+        return start, serialization_s
+
     def _send(
         self, now: float, src: str, nh: str, pkt: Packet, snap: TopologySnapshot
     ) -> None:
         loss_p = float(self.scenario.link.loss_prob)
 
         if nh == "__broadcast__":
-            for neigh in snap.adj.get(src, []):
+            for neigh in sorted(snap.adj.get(src, [])):
                 if loss_p > 0 and self.rng.random() < loss_p:
                     if pkt.type == PacketType.DATA:
                         fid = self._flow_id_for(pkt)
@@ -323,19 +360,14 @@ class Simulator:
                             self.metrics.flows[fid].dropped += 1
                     continue
                 delay, cap = self._edge_params(snap, src, neigh)
-                ser = (pkt.size_bytes * 8.0) / (cap * 1e6) if cap > 0 else 0.0
-                key = (src, neigh)
-                free = self._link_free_at.get(key, now)
-                start = max(now, free)
-                if pkt.type == PacketType.DATA:
-                    qlen = self._link_qlen.get(key, 0)
-                    if qlen >= self.queue_limit and start > now:
+                reservation = self._reserve_link(now, src, neigh, pkt, cap)
+                if reservation is None:
+                    if pkt.type == PacketType.DATA:
                         fid = self._flow_id_for(pkt)
                         if fid:
                             self.metrics.flows[fid].dropped += 1
-                        continue
-                    self._link_qlen[key] = qlen + 1
-                self._link_free_at[key] = start + ser
+                    continue
+                start, ser = reservation
                 arr = start + ser + delay
                 new_pkt = Packet(
                     pkt_id=pkt.pkt_id,
@@ -366,25 +398,17 @@ class Simulator:
             return
 
         delay, cap = self._edge_params(snap, src, nh)
-        ser = (pkt.size_bytes * 8.0) / (cap * 1e6) if cap > 0 else 0.0
-        key = (src, nh)
-        free = self._link_free_at.get(key, now)
-        start = max(now, free)
-        if pkt.type == PacketType.DATA:
-            qlen = self._link_qlen.get(key, 0)
-            if qlen >= self.queue_limit and start > now:
+        reservation = self._reserve_link(now, src, nh, pkt, cap)
+        if reservation is None:
+            if pkt.type == PacketType.DATA:
                 fid = self._flow_id_for(pkt)
                 if fid:
                     self.metrics.flows[fid].dropped += 1
-                return
-            self._link_qlen[key] = qlen + 1
-        self._link_free_at[key] = start + ser
+            return
+        start, ser = reservation
         arr = start + ser + delay
         pkt.path = list(pkt.path) + [src]
         self._schedule(arr, "arrival", node=nh, packet=pkt)
-
-        if pkt.type == PacketType.DATA:
-            self._link_qlen[key] = max(0, self._link_qlen.get(key, 1) - 1)
 
     def _flow_id_for(self, pkt: Packet) -> Optional[str]:
         for f in self.scenario.traffic:

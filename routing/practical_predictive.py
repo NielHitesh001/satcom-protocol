@@ -113,7 +113,7 @@ class PracticalPredictiveProtocol(RoutingProtocol):
             if u in visited:
                 continue
             visited.add(u)
-            for v in self._graph.get(u, []):
+            for v in sorted(self._graph.get(u, [])):
                 if self._edge_lifetime.get((u, v), self.horizon_s) < 0.5:
                     continue
                 w = self._edge_weight.get((u, v), 1.0)

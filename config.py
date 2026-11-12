@@ -29,6 +29,7 @@ class TrafficFlow:
     duration_s: float
     rate_pps: float
     packet_size_bytes: int = 512
+    arrival_model: str = "deterministic"  # deterministic or poisson
 
 
 @dataclass
@@ -38,6 +39,7 @@ class LinkParams:
     capacity_mbps: float = 100.0
     loss_prob: float = 0.0
     queue_limit: int = 64
+    max_isl_degree: Optional[int] = None
 
 
 @dataclass

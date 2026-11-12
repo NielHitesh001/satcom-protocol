@@ -20,14 +20,33 @@ import yaml
 
 from engine import run_scenario
 
+# Two-sided 95% Student-t critical values for degrees of freedom 1–30.
+_T975 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+    7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+    13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110,
+    18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074,
+    23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052,
+    28: 2.048, 29: 2.045, 30: 2.042,
+}
+
+
 
 def _mean_std(xs: List[float]) -> Dict[str, Any]:
     xs = [x for x in xs if x is not None and not (isinstance(x, float) and math.isnan(x))]
     if not xs:
-        return {"mean": None, "std": None, "n": 0}
+        return {"mean": None, "std": None, "ci95_half_width": None, "n": 0}
     if len(xs) == 1:
-        return {"mean": xs[0], "std": 0.0, "n": 1}
-    return {"mean": statistics.mean(xs), "std": statistics.stdev(xs), "n": len(xs)}
+        return {"mean": xs[0], "std": 0.0, "ci95_half_width": None, "n": 1}
+    std = statistics.stdev(xs)
+    n = len(xs)
+    t_critical = _T975.get(n - 1, 1.960)
+    return {
+        "mean": statistics.mean(xs),
+        "std": std,
+        "ci95_half_width": t_critical * std / math.sqrt(n),
+        "n": n,
+    }
 
 
 def run_matrix(

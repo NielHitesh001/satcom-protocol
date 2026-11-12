@@ -1,33 +1,21 @@
-# Phase 2 — Routing Improvements
+# Phase 2 — Routing status
 
-## AODV
-- Intermediate RREP when a node has a fresh route to the destination
-- RERR on link break with precursor notification and limited propagation
-- Expired routes removed on access
-- DATA still buffered at end-of-sim counted as **residual** (not drop)
+## Implemented behavior
 
-## OLSR
-- Topology entries stored as `(neighbor_set, timestamp)`
-- Entries older than `hold_time_s` expire on tick / recompute
-- Neighbor soft-state expiry via `neighbor_time`
-- `seen_tc` bounded to prevent unbounded growth
+- AODV-style route-request flooding and destination-originated route replies
+- Route expiry and local invalidation when a directly used link goes down
+- Buffered AODV data is reported as **residual** when the simulation ends
+- OLSR HELLO/TC exchange, MPR selection, and shortest-path recomputation
+- Practical predictive routing based on current topology and estimated link lifetime
 
-## Practical predictive (non-oracle)
-- Residual link lifetime from range-rate between topology snapshots
-- Edge weight = 1 + distance penalty + lifetime penalty
-- Links with residual lifetime < 0.5 s are skipped in Dijkstra
-- Horizon (`horizon_s`) controls soft preference for stable links
+## Deliberate simplifications
 
-## Example results (seed 42, 15 sats, 180 s)
+This is not an RFC-complete AODV or OLSR implementation.
 
-| Protocol | Delivery | Residual | Control |
-|----------|----------|----------|--------|
-| predictive (oracle) | 1.000 | 0 | 0 |
-| practical_predictive | 1.000 | 0 | 288 |
-| aodv | 0.692 | 12 | 174 |
-| olsr | 0.974 | 0 | 15016 |
+- AODV does **not** yet implement scheduled RREQ retry/timeout.
+- AODV does **not** send or process RERR packets.
+- AODV does **not** implement intermediate-node RREP.
+- OLSR timing and flooding are simplified for the discrete-event model.
 
-AODV residual packets are those still buffered after routes were invalidated by topology changes (RERR path). Conservation `sent = delivered + dropped + residual` holds.
-
-## Tests
-`tests/test_routing_phase2.py` — intermediate RREP, RERR, OLSR expiry, lifetime weighting.
+Metrics obey: `sent = delivered + dropped + residual`.  A residual packet is either
+still scheduled for arrival or buffered pending AODV discovery at the cutoff.
