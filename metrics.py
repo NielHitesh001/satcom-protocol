@@ -93,6 +93,7 @@ class RunMetrics:
     route_changes: int = 0
     discovery_times_s: List[float] = field(default_factory=list)
     events_processed: int = 0
+    workload_fingerprint: Optional[str] = None
 
     def summary_dict(self) -> dict:
         total_sent = sum(f.sent for f in self.flows.values())
@@ -131,6 +132,7 @@ class RunMetrics:
             ),
             "peak_state_bytes_total": sum(self.peak_state_bytes.values()),
             "events_processed": self.events_processed,
+            "workload_fingerprint": self.workload_fingerprint,
         }
 
     def to_csv(self, path: str | Path) -> None:
