@@ -57,7 +57,7 @@ class PredictiveProtocol(RoutingProtocol):
             if u in visited:
                 continue
             visited.add(u)
-            for v in graph.get(u, []):
+            for v in sorted(graph.get(u, [])):
                 nd = d + 1
                 if v not in dist or nd < dist[v]:
                     dist[v] = nd
