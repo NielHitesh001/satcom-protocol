@@ -178,13 +178,16 @@ class Simulator:
         self.metrics.route_changes = sum(
             1 for e in self.protocol.route_events if e.event_type == "route_change"
         )
+        # Discovery latency: start at origin → route installed at origin only
         starts = {(e.node, e.destination): e.time_s
                   for e in self.protocol.route_events if e.event_type == "discovery_start"}
         for e in self.protocol.route_events:
-            if e.event_type == "discovery_end":
+            if e.event_type == "discovery_end" and e.detail == "route installed":
                 key = (e.node, e.destination)
                 if key in starts:
-                    self.metrics.discovery_times_s.append(e.time_s - starts[key])
+                    dt = e.time_s - starts[key]
+                    if dt >= 0:
+                        self.metrics.discovery_times_s.append(dt)
 
         return self.metrics
 
