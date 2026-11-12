@@ -87,11 +87,9 @@ class Simulator:
         self.in_flight: List[Tuple[float, str, Packet]] = []
 
     def _parse_time(self, s: str) -> datetime:
-        # Accept ISO or a simple epoch-like string
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
         except Exception:
-            # Fallback: treat as days since a fixed epoch for demo
             return datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     def _make_protocol(self) -> RoutingProtocol:
@@ -108,7 +106,6 @@ class Simulator:
 
     def run(self) -> RunMetrics:
         """Execute the simulation and return collected metrics."""
-        step = self.scenario.time_step_s
         prev_adj: Dict[str, set] = {n: set() for n in self.node_names}
         traffic_idx = 0
 
@@ -129,7 +126,6 @@ class Simulator:
             if isinstance(self.protocol, OLSRProtocol):
                 for n in self.node_names:
                     for ctrl in self.protocol.tick(t, n):
-                        # Immediate local delivery of HELLO / TC to neighbors
                         for neigh in snap.adj.get(n, []):
                             self.protocol.on_packet(t, neigh, ctrl)
 
@@ -140,10 +136,8 @@ class Simulator:
                 flow_id = self._flow_id_for(ev.packet)
                 if flow_id:
                     self.metrics.flows[flow_id].sent += 1
-                # Hand to routing at the source
                 nh = self.protocol.on_packet(t, ev.packet.src, ev.packet)
                 if nh is None:
-                    # Either delivered (src==dst) or dropped / discovery started
                     if ev.packet.src == ev.packet.dst and flow_id:
                         self.metrics.flows[flow_id].delivered += 1
                     elif flow_id:
@@ -180,13 +174,19 @@ class Simulator:
                 if sz > prev:
                     self.metrics.peak_state_bytes[n] = sz
 
+        # Packets still in flight at end-of-sim are counted as dropped
+        for _arr_t, _node, pkt in self.in_flight:
+            flow_id = self._flow_id_for(pkt)
+            if flow_id:
+                self.metrics.flows[flow_id].dropped += 1
+        self.in_flight.clear()
+
         # Final control counters
         self.metrics.control_messages_sent = self.protocol.control_messages_sent()
         self.metrics.control_messages_recv = self.protocol.control_messages_received()
         self.metrics.route_changes = sum(
             1 for e in self.protocol.route_events if e.event_type == "route_change"
         )
-        # Approximate discovery times
         starts = { (e.node, e.destination): e.time_s
                    for e in self.protocol.route_events if e.event_type == "discovery_start" }
         for e in self.protocol.route_events:
@@ -200,7 +200,6 @@ class Simulator:
     def _send(self, now: float, src: str, nh: str, pkt: Packet, snap: TopologySnapshot) -> None:
         if nh == "__broadcast__":
             for neigh in snap.adj.get(src, []):
-                # Find delay
                 delay = 0.001
                 for e in snap.edges:
                     if (e.u == src and e.v == neigh) or (e.v == src and e.u == neigh):
@@ -220,7 +219,6 @@ class Simulator:
                 self.in_flight.append((now + delay, neigh, new_pkt))
             return
 
-        # Unicast
         delay = 0.001
         for e in snap.edges:
             if (e.u == src and e.v == nh) or (e.v == src and e.u == nh):
@@ -241,7 +239,6 @@ def run_scenario(scenario_path: str | Path, output_dir: str | Path = "outputs") 
     scenario_path = Path(scenario_path).resolve()
     scenario = load_scenario(scenario_path)
 
-    # Resolve relative TLE path against the scenario file location
     tle = Path(scenario.tle_path)
     if not tle.is_absolute():
         candidate = scenario_path.parent / tle
