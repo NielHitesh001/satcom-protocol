@@ -1,10 +1,10 @@
 name: example_small
 start_time_utc: "2026-01-01T00:00:00Z"
-duration_s: 300
-time_step_s: 30
+duration_s: 180
+time_step_s: 15
 tle_path: data/starlink_sample.tle
 tle_snapshot_id: sample-2026-01-01
-max_sats: 20
+max_sats: 15
 protocol: predictive
 seed: 42
 
@@ -29,18 +29,17 @@ link:
   loss_prob: 0.0
 
 traffic:
-  # Pure satellite-to-satellite flows (Option B focus)
   - flow_id: f1
     source: STARLINK-1007
     destination: STARLINK-1020
-    start_s: 10
-    duration_s: 200
-    rate_pps: 0.5
+    start_s: 5
+    duration_s: 120
+    rate_pps: 0.2
     packet_size_bytes: 512
   - flow_id: f2
     source: STARLINK-1010
-    destination: STARLINK-1025
-    start_s: 20
-    duration_s: 180
-    rate_pps: 0.3
+    destination: STARLINK-1015
+    start_s: 10
+    duration_s: 100
+    rate_pps: 0.15
     packet_size_bytes: 256
