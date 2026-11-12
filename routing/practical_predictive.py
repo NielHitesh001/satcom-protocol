@@ -1,12 +1,8 @@
 """
 practical_predictive.py – Deployable-style predictive routing (NOT an oracle).
 
-Uses only information available at the current time:
-  - Current topology
-  - Configurable prediction horizon / recompute interval
-  - Models schedule distribution as control cost
-
-Unlike PredictiveProtocol (oracle), this does not use future snapshots.
+Uses current topology, range-rate residual lifetime, and configurable horizon.
+Unlike PredictiveProtocol, does not use future snapshots.
 """
 
 from __future__ import annotations
@@ -26,13 +22,18 @@ class PracticalPredictiveProtocol(RoutingProtocol):
         nodes: List[str],
         horizon_s: float = 30.0,
         recompute_interval_s: float = 10.0,
+        max_range_km: float = 5000.0,
     ):
         super().__init__(nodes)
         self.horizon_s = horizon_s
         self.recompute_interval_s = recompute_interval_s
+        self.max_range_km = max_range_km
         self.neighbors: Dict[str, Set[str]] = {n: set() for n in nodes}
         self.routing_table: Dict[str, Dict[str, str]] = {n: {} for n in nodes}
         self._edge_weight: Dict[Tuple[str, str], float] = {}
+        self._edge_lifetime: Dict[Tuple[str, str], float] = {}
+        self._prev_range: Dict[Tuple[str, str], float] = {}
+        self._prev_time: float = -1.0
         self._last_recompute = -1e9
         self._graph: Dict[str, Set[str]] = defaultdict(set)
 
@@ -44,17 +45,23 @@ class PracticalPredictiveProtocol(RoutingProtocol):
             self._graph[v].add(u)
             self._edge_weight[(u, v)] = 1.0
             self._edge_weight[(v, u)] = 1.0
+            self._edge_lifetime[(u, v)] = self.horizon_s
+            self._edge_lifetime[(v, u)] = self.horizon_s
         else:
             self.neighbors[u].discard(v)
             self.neighbors[v].discard(u)
             self._graph[u].discard(v)
             self._graph[v].discard(u)
-            self._edge_weight.pop((u, v), None)
-            self._edge_weight.pop((v, u), None)
+            for key in ((u, v), (v, u)):
+                self._edge_weight.pop(key, None)
+                self._edge_lifetime.pop(key, None)
+                self._prev_range.pop(key, None)
         self._recompute_all()
         self._control_sent += 1
 
     def update_from_snapshot(self, snap: TopologySnapshot, time_s: float) -> None:
+        dt = time_s - self._prev_time if self._prev_time >= 0 else 0.0
+        new_ranges: Dict[Tuple[str, str], float] = {}
         self._graph = defaultdict(set)
         self.neighbors = {n: set() for n in self.nodes}
         for e in snap.edges:
@@ -62,9 +69,31 @@ class PracticalPredictiveProtocol(RoutingProtocol):
             self._graph[e.v].add(e.u)
             self.neighbors[e.u].add(e.v)
             self.neighbors[e.v].add(e.u)
-            w = 1.0 + e.distance_km / 10000.0
-            self._edge_weight[(e.u, e.v)] = w
-            self._edge_weight[(e.v, e.u)] = w
+            for a, b in ((e.u, e.v), (e.v, e.u)):
+                new_ranges[(a, b)] = e.distance_km
+
+        for key, dist in new_ranges.items():
+            lifetime = self.horizon_s
+            if dt > 1e-6 and key in self._prev_range:
+                dr = dist - self._prev_range[key]
+                rate = dr / dt
+                if rate > 1e-6:
+                    remaining_km = max(0.0, self.max_range_km - dist)
+                    lifetime = remaining_km / rate
+                elif rate < -1e-6:
+                    lifetime = self.horizon_s * 2.0
+            dist_pen = dist / 10000.0
+            if lifetime < self.horizon_s:
+                life_pen = (self.horizon_s - lifetime) / max(self.horizon_s, 1.0) * 5.0
+            else:
+                life_pen = 0.0
+            if lifetime < 1.0:
+                life_pen += 100.0
+            self._edge_weight[key] = 1.0 + dist_pen + life_pen
+            self._edge_lifetime[key] = lifetime
+
+        self._prev_range = new_ranges
+        self._prev_time = time_s
         if time_s - self._last_recompute >= self.recompute_interval_s:
             self._recompute_all()
             self._last_recompute = time_s
@@ -85,6 +114,8 @@ class PracticalPredictiveProtocol(RoutingProtocol):
                 continue
             visited.add(u)
             for v in self._graph.get(u, []):
+                if self._edge_lifetime.get((u, v), self.horizon_s) < 0.5:
+                    continue
                 w = self._edge_weight.get((u, v), 1.0)
                 nd = d + w
                 if v not in dist or nd < dist[v]:
