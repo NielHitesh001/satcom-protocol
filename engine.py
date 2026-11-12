@@ -109,6 +109,7 @@ class Simulator:
 
         self.traffic_gen = TrafficGenerator(scenario.traffic, scenario.seed)
         self.traffic_events = self.traffic_gen.generate(scenario.duration_s)
+        self.metrics.workload_fingerprint = self.traffic_gen.fingerprint(self.traffic_events)
 
         self._link_free_at: Dict[Tuple[str, str], float] = {}
         self.queue_limit = int(getattr(scenario.link, "queue_limit", 64) or 64)
