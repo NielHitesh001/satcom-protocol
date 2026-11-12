@@ -27,7 +27,6 @@ class Simulator:
         self.scenario = scenario
         self.rng = np.random.default_rng(scenario.seed)
 
-        # Load satellites
         self.sats = load_tles(
             scenario.tle_path,
             max_sats=scenario.max_sats,
@@ -39,7 +38,6 @@ class Simulator:
         self.ground_pos = build_ground_positions(scenario.ground_sites)
         self.node_names = list(self.sats.keys()) + list(self.ground_pos.keys())
 
-        # Time grid
         self.start_dt = self._parse_time(scenario.start_time_utc)
         self.times: List[datetime] = []
         t = self.start_dt
@@ -48,10 +46,8 @@ class Simulator:
             self.times.append(t)
             t += timedelta(seconds=scenario.time_step_s)
 
-        # Propagate once
         self.sat_pos_series = propagate_positions(self.sats, self.times)
 
-        # Pre-compute topology snapshots
         self.snapshots: List[TopologySnapshot] = []
         for i, dt in enumerate(self.times):
             sat_pos = {n: self.sat_pos_series[n][i] for n in self.sats}
@@ -63,10 +59,8 @@ class Simulator:
             )
             self.snapshots.append(snap)
 
-        # Routing protocol
         self.protocol: RoutingProtocol = self._make_protocol()
 
-        # Metrics
         self.metrics = RunMetrics(
             scenario_name=scenario.name,
             protocol=scenario.protocol,
@@ -79,11 +73,8 @@ class Simulator:
                 flow_id=f.flow_id, src=f.source, dst=f.destination
             )
 
-        # Traffic events
         self.traffic_gen = TrafficGenerator(scenario.traffic, scenario.seed)
         self.traffic_events = self.traffic_gen.generate(scenario.duration_s)
-
-        # Simple in-flight packet queue: (delivery_time, node, packet)
         self.in_flight: List[Tuple[float, str, Packet]] = []
 
     def _parse_time(self, s: str) -> datetime:
@@ -105,14 +96,12 @@ class Simulator:
         raise ValueError(f"Unknown protocol: {proto}")
 
     def run(self) -> RunMetrics:
-        """Execute the simulation and return collected metrics."""
         prev_adj: Dict[str, set] = {n: set() for n in self.node_names}
         traffic_idx = 0
 
         for i, snap in enumerate(self.snapshots):
             t = snap.time_s
 
-            # 1. Topology change events
             for n in self.node_names:
                 old = prev_adj.get(n, set())
                 new = snap.adj.get(n, set())
@@ -122,14 +111,12 @@ class Simulator:
                     self.protocol.on_link_change(t, n, gained, up=True)
             prev_adj = {n: set(snap.adj.get(n, set())) for n in self.node_names}
 
-            # 2. OLSR periodic tick
             if isinstance(self.protocol, OLSRProtocol):
                 for n in self.node_names:
                     for ctrl in self.protocol.tick(t, n):
-                        for neigh in snap.adj.get(n, []):
-                            self.protocol.on_packet(t, neigh, ctrl)
+                        self._send(t, n, "__broadcast__", ctrl, snap)
+                self._drain_outbound(t, snap)
 
-            # 3. Inject traffic that is due
             while traffic_idx < len(self.traffic_events) and self.traffic_events[traffic_idx].time_s <= t:
                 ev = self.traffic_events[traffic_idx]
                 traffic_idx += 1
@@ -140,55 +127,59 @@ class Simulator:
                 if nh is None:
                     if ev.packet.src == ev.packet.dst and flow_id:
                         self.metrics.flows[flow_id].delivered += 1
-                    elif flow_id:
+                    elif flow_id and not self._is_buffered(ev.packet.src, ev.packet):
                         self.metrics.flows[flow_id].dropped += 1
                 else:
                     self._send(t, ev.packet.src, nh, ev.packet, snap)
+                self._drain_outbound(t, snap)
 
-            # 4. Deliver in-flight packets whose arrival time has come
-            still_flying = []
-            for arr_t, node, pkt in self.in_flight:
-                if arr_t <= t:
-                    nh = self.protocol.on_packet(t, node, pkt)
-                    flow_id = self._flow_id_for(pkt)
-                    if nh is None:
-                        if node == pkt.dst:
-                            if flow_id:
-                                fm = self.metrics.flows[flow_id]
-                                fm.delivered += 1
-                                fm.latencies_s.append(t - pkt.creation_time_s)
-                                fm.hop_counts.append(len(pkt.path))
+            progress = True
+            guard = 0
+            while progress and guard < 10000:
+                guard += 1
+                progress = False
+                still_flying = []
+                for arr_t, node, pkt in self.in_flight:
+                    if arr_t <= t + 1e-9:
+                        progress = True
+                        nh = self.protocol.on_packet(t, node, pkt)
+                        flow_id = self._flow_id_for(pkt)
+                        if nh is None:
+                            if node == pkt.dst:
+                                if flow_id and pkt.type == PacketType.DATA:
+                                    fm = self.metrics.flows[flow_id]
+                                    fm.delivered += 1
+                                    fm.latencies_s.append(t - pkt.creation_time_s)
+                                    fm.hop_counts.append(len(pkt.path))
+                            elif flow_id and pkt.type == PacketType.DATA:
+                                if not self._is_buffered(node, pkt):
+                                    self.metrics.flows[flow_id].dropped += 1
                         else:
-                            if flow_id:
-                                self.metrics.flows[flow_id].dropped += 1
+                            self._send(t, node, nh, pkt, snap)
+                        self._drain_outbound(t, snap)
                     else:
-                        self._send(t, node, nh, pkt, snap)
-                else:
-                    still_flying.append((arr_t, node, pkt))
-            self.in_flight = still_flying
+                        still_flying.append((arr_t, node, pkt))
+                self.in_flight = still_flying
 
-            # 5. Track peak state size
             for n in self.node_names:
                 sz = self.protocol.state_size(n)
                 prev = self.metrics.peak_state_bytes.get(n, 0)
                 if sz > prev:
                     self.metrics.peak_state_bytes[n] = sz
 
-        # Packets still in flight at end-of-sim are counted as dropped
         for _arr_t, _node, pkt in self.in_flight:
             flow_id = self._flow_id_for(pkt)
             if flow_id:
                 self.metrics.flows[flow_id].dropped += 1
         self.in_flight.clear()
 
-        # Final control counters
         self.metrics.control_messages_sent = self.protocol.control_messages_sent()
         self.metrics.control_messages_recv = self.protocol.control_messages_received()
         self.metrics.route_changes = sum(
             1 for e in self.protocol.route_events if e.event_type == "route_change"
         )
-        starts = { (e.node, e.destination): e.time_s
-                   for e in self.protocol.route_events if e.event_type == "discovery_start" }
+        starts = {(e.node, e.destination): e.time_s
+                  for e in self.protocol.route_events if e.event_type == "discovery_start"}
         for e in self.protocol.route_events:
             if e.event_type == "discovery_end":
                 key = (e.node, e.destination)
@@ -197,14 +188,21 @@ class Simulator:
 
         return self.metrics
 
+    def _is_buffered(self, node: str, pkt: Packet) -> bool:
+        if not isinstance(self.protocol, AODVProtocol):
+            return False
+        buf = self.protocol.buffer.get(node, {}).get(pkt.dst, [])
+        return any(p.pkt_id == pkt.pkt_id for p in buf)
+
+    def _drain_outbound(self, now: float, snap: TopologySnapshot) -> None:
+        if not isinstance(self.protocol, AODVProtocol):
+            return
+        for ob in self.protocol.pop_outbound():
+            self._send(now, ob.node, ob.next_hop or "__broadcast__", ob.packet, snap)
+
     def _send(self, now: float, src: str, nh: str, pkt: Packet, snap: TopologySnapshot) -> None:
         if nh == "__broadcast__":
             for neigh in snap.adj.get(src, []):
-                delay = 0.001
-                for e in snap.edges:
-                    if (e.u == src and e.v == neigh) or (e.v == src and e.u == neigh):
-                        delay = e.delay_s
-                        break
                 new_pkt = Packet(
                     pkt_id=pkt.pkt_id,
                     src=pkt.src,
@@ -214,18 +212,13 @@ class Simulator:
                     creation_time_s=pkt.creation_time_s,
                     ttl=pkt.ttl,
                     payload=pkt.payload,
-                    path=pkt.path + [src],
+                    path=list(pkt.path) + [src],
                 )
-                self.in_flight.append((now + delay, neigh, new_pkt))
+                self.in_flight.append((now, neigh, new_pkt))
             return
 
-        delay = 0.001
-        for e in snap.edges:
-            if (e.u == src and e.v == nh) or (e.v == src and e.u == nh):
-                delay = e.delay_s
-                break
-        pkt.path.append(src)
-        self.in_flight.append((now + delay, nh, pkt))
+        pkt.path = list(pkt.path) + [src]
+        self.in_flight.append((now, nh, pkt))
 
     def _flow_id_for(self, pkt: Packet) -> Optional[str]:
         for f in self.scenario.traffic:
@@ -235,7 +228,6 @@ class Simulator:
 
 
 def run_scenario(scenario_path: str | Path, output_dir: str | Path = "outputs") -> RunMetrics:
-    """Convenience entry point."""
     scenario_path = Path(scenario_path).resolve()
     scenario = load_scenario(scenario_path)
 
