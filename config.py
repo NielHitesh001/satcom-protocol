@@ -29,6 +29,7 @@ class TrafficFlow:
     duration_s: float
     rate_pps: float
     packet_size_bytes: int = 512
+    arrival_model: str = "deterministic"  # deterministic or poisson
 
 
 @dataclass
