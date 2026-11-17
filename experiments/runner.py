@@ -55,7 +55,10 @@ def run_matrix(
             # Resolve tle relative to original scenario
             tle = Path(data["tle_path"])
             if not tle.is_absolute():
-                data["tle_path"] = str((scenario_path.parent / tle).resolve())
+                candidate = scenario_path.parent / tle
+                if not candidate.exists():
+                    candidate = scenario_path.parent.parent / tle
+                data["tle_path"] = str(candidate.resolve())
             scn = out_dir / f"scn_{proto}_{seed}.yaml"
             scn.write_text(yaml.dump(data))
             metrics = run_scenario(scn, output_dir=out_dir)

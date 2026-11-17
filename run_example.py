@@ -5,13 +5,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Allow running as `python -m satellite_adhoc_sim.run_example`
-ROOT = Path(__file__).resolve().parent.parent
+# Run from the repo root: PYTHONPATH=. python run_example.py
+ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from satellite_adhoc_sim.engine import run_scenario
-from satellite_adhoc_sim.analysis import plot_delivery_ratio, plot_latency, plot_control_overhead
+from engine import run_scenario
 
 
 def main() -> None:
@@ -42,6 +41,7 @@ def main() -> None:
 
     # Plots
     try:
+        from analysis import plot_delivery_ratio, plot_latency, plot_control_overhead
         plot_delivery_ratio(flow_csvs, out_dir / "delivery_ratio.png")
         plot_latency(flow_csvs, out_dir / "latency.png")
         plot_control_overhead(manifests, out_dir / "control_overhead.png")

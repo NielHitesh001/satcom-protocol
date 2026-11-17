@@ -181,6 +181,7 @@ def test_congestion_drops_with_tiny_queue(tmp_path):
     total = s["packets_sent"]
     assert total > 0
     assert s["packets_delivered"] + s["packets_dropped"] + s["packets_residual"] == total
+    assert s["packets_dropped"] > 0
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from traffic import TrafficGenerator
 # Event kind priorities at equal time (lower = earlier)
 _KIND_ORDER = {
     "topology": 0,
+    "tx_done": 0,
     "tick": 1,
     "inject": 2,
     "arrival": 3,
@@ -208,6 +209,9 @@ class Simulator:
                 break
             if ev.kind == "topology":
                 self._handle_topology(ev)
+            elif ev.kind == "tx_done":
+                key = (ev.node, ev.next_hop)
+                self._link_qlen[key] = max(0, self._link_qlen.get(key, 1) - 1)
             elif ev.kind == "tick":
                 self._handle_tick(ev.time)
             elif ev.kind == "inject":
@@ -368,8 +372,13 @@ class Simulator:
                 key = (src, neigh)
                 free = self._link_free_at.get(key, now)
                 start = max(now, free)
-                # Simple queue limit for DATA only
+                # DATA queue: hold a slot until serialization finishes (tx_done).
                 if pkt.type == PacketType.DATA:
+                    if pkt.ttl <= 0:
+                        fid = self._flow_id_for(pkt)
+                        if fid:
+                            self.metrics.flows[fid].dropped += 1
+                        continue
                     qlen = self._link_qlen.get(key, 0)
                     if qlen >= self.queue_limit and start > now:
                         fid = self._flow_id_for(pkt)
@@ -377,9 +386,11 @@ class Simulator:
                             self.metrics.flows[fid].dropped += 1
                         continue
                     self._link_qlen[key] = qlen + 1
+                    self._schedule(start + ser, "tx_done", node=src, next_hop=neigh)
                 self._link_free_at[key] = start + ser
                 self._note_control_airtime(pkt, ser)
                 arr = start + ser + delay
+                out_ttl = pkt.ttl - 1 if pkt.type == PacketType.DATA else pkt.ttl
                 new_pkt = Packet(
                     pkt_id=pkt.pkt_id,
                     src=pkt.src,
@@ -387,7 +398,7 @@ class Simulator:
                     type=pkt.type,
                     size_bytes=pkt.size_bytes,
                     creation_time_s=pkt.creation_time_s,
-                    ttl=pkt.ttl,
+                    ttl=out_ttl,
                     payload=pkt.payload,
                     path=list(pkt.path) + [src],
                 )
@@ -401,6 +412,12 @@ class Simulator:
                 fid = self._flow_id_for(pkt)
                 if fid:
                     self.metrics.flows[fid].dropped += 1
+            return
+
+        if pkt.type == PacketType.DATA and pkt.ttl <= 0:
+            fid = self._flow_id_for(pkt)
+            if fid:
+                self.metrics.flows[fid].dropped += 1
             return
 
         if loss_p > 0 and self.rng.random() < loss_p:
@@ -424,15 +441,14 @@ class Simulator:
                     self.metrics.flows[fid].dropped += 1
                 return
             self._link_qlen[key] = qlen + 1
+            self._schedule(start + ser, "tx_done", node=src, next_hop=nh)
         self._link_free_at[key] = start + ser
         self._note_control_airtime(pkt, ser)
         arr = start + ser + delay
+        if pkt.type == PacketType.DATA:
+            pkt.ttl -= 1
         pkt.path = list(pkt.path) + [src]
         self._schedule(arr, "arrival", node=nh, packet=pkt)
-
-        # Decrement queue when transmission starts (approximate)
-        if pkt.type == PacketType.DATA:
-            self._link_qlen[key] = max(0, self._link_qlen.get(key, 1) - 1)
 
     def _note_control_airtime(self, pkt: Packet, ser_s: float) -> None:
         """Observational airtime for control PDUs that were actually scheduled.

@@ -10,7 +10,7 @@ Research-oriented discrete-event simulator for **ad hoc routing over a LEO mesh*
 
 ```bash
 pip install -r requirements.txt
-PYTHONPATH=. pytest tests/ -q          # 56 tests
+PYTHONPATH=. pytest tests/ -q
 PYTHONPATH=. python run_example.py
 ```
 
@@ -49,7 +49,7 @@ PYTHONPATH=. python scripts/bench_topology.py
 | `routing/` | AODV, OLSR, practical predictive, oracle predictive |
 | `metrics.py` | Delivery, loss, residual, p50/p95/p99 latency (null if undefined) |
 | `experiments/` | Multi-seed protocol comparison runner |
-| `docs/` | AUDIT, ENGINE, PHASE2, PHASE3 |
+| `docs/` | AUDIT, ENGINE, PHASE2–PHASE6 |
 
 **Event priority (same timestamp):** topology → tick → inject → arrival → end.
 
@@ -85,7 +85,7 @@ Latencies include light-time + serialization (event-queue engine).
 | aodv | ~0.69 | ~12 | ~0.063 s | ~174 |
 | olsr | ~0.97 | 0 | ~0.059 s | ~15k |
 
-AODV residual reflects buffers left after RERR invalidates routes on topology change — more accurate than keeping stale next hops.
+AODV delivery below 1.0 is residual DATA still buffered when a route is invalidated or the run ends. Residuals are not network drops. RREP is forwarded toward the origin; without that forward, delivery on this scenario is 0.
 
 ---
 
@@ -118,6 +118,9 @@ Spatial hash vs brute force (synthetic LEO, max_range 3000 km):
 | `docs/ENGINE.md` | Event model, delays, metrics conventions |
 | `docs/PHASE2.md` | Routing improvements |
 | `docs/PHASE3.md` | Spatial index and benchmarks |
+| `docs/PHASE4.md` | Large-constellation profiling |
+| `docs/PHASE5.md` | Connectivity-aware traffic and fair comparison |
+| `docs/PHASE6.md` | Control-byte accounting and sensitivity |
 
 ---
 

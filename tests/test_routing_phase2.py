@@ -78,6 +78,38 @@ def test_aodv_intermediate_rrep():
     assert rrep.next_hop == "A"
 
 
+def test_aodv_rrep_forwarded_toward_origin():
+    """An intermediate hop must return the next hop so the engine forwards the RREP."""
+    proto = AODVProtocol(NODES)
+    _install(proto)
+    proto.routing_table["B"]["A"] = RouteEntry(
+        dest="A", next_hop="A", seq_no=1, hop_count=1, expiry_s=100.0
+    )
+    proto.routing_table["B"]["C"] = RouteEntry(
+        dest="C", next_hop="C", seq_no=5, hop_count=1, expiry_s=100.0
+    )
+    rrep = Packet(
+        pkt_id=2,
+        src="C",
+        dst="A",
+        type=PacketType.RREP,
+        size_bytes=64,
+        creation_time_s=1.0,
+        ttl=10,
+        path=["C"],
+        payload={
+            "dest": "C",
+            "dest_seq": 5,
+            "origin": "A",
+            "hop_count": 0,
+            "lifetime": 30.0,
+        },
+    )
+    nh = proto.on_packet(1.0, "B", rrep)
+    assert nh == "A"
+    assert proto.routing_table["B"]["C"].next_hop == "C"
+
+
 def test_aodv_rerr_on_link_break():
     """Link down should invalidate routes and emit RERR."""
     proto = AODVProtocol(NODES)

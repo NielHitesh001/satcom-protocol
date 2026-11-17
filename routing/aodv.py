@@ -339,6 +339,7 @@ class AODVProtocol(RoutingProtocol):
         if nh:
             p["hop_count"] = hop
             self.account_control("RREP", 1, packet.size_bytes)
+            return nh
         return None
 
     def _handle_rerr(self, time_s: float, node: str, packet: Packet) -> Optional[str]:
