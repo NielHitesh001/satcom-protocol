@@ -51,7 +51,7 @@ PYTHONPATH=. python scripts/bench_topology.py
 | `experiments/` | Multi-seed protocol comparison runner |
 | `docs/` | AUDIT, ENGINE, PHASE2–PHASE6 |
 
-**Event priority (same timestamp):** topology → tick → inject → arrival → end.
+**Event priority (same timestamp):** topology and `tx_done` (queue release), then tick → inject → arrival → end. Same kind breaks ties by insertion order.
 
 **Packet fates:** `sent = delivered + dropped + residual`  
 Residual = in-flight or still buffered at termination (not counted as a network drop).
@@ -81,11 +81,11 @@ Latencies include light-time + serialization (event-queue engine).
 | Protocol | Delivery | Residual | Mean latency | Control |
 |----------|----------|----------|--------------|---------|
 | predictive (oracle) | 1.000 | 0 | ~0.060 s | 0 |
-| practical_predictive | 1.000 | 0 | ~0.060 s | ~288 |
-| aodv | ~0.69 | ~12 | ~0.063 s | ~174 |
-| olsr | ~0.97 | 0 | ~0.059 s | ~15k |
+| practical_predictive | 1.000 | 0 | ~0.060 s | 288 |
+| aodv | 1.000 | 0 | ~0.069 s | 179 |
+| olsr | 0.974 | 0 | ~0.059 s | 15016 |
 
-AODV delivery below 1.0 is residual DATA still buffered when a route is invalidated or the run ends. Residuals are not network drops. RREP is forwarded toward the origin; without that forward, delivery on this scenario is 0.
+AODV delivers all 39 example packets. An earlier build reported delivery ~0.69 and residual ~12; that was not RERR. The reverse route ignored a newer origin sequence, so after the first route expired the returning RREP was discarded and DATA stayed buffered. RREP is forwarded toward the origin. OLSR's control count is stable across process hash seeds (MPR ties break by node name). One OLSR data packet is still dropped.
 
 ---
 
@@ -130,4 +130,4 @@ Spatial hash vs brute force (synthetic LEO, max_range 3000 km):
 PYTHONPATH=. pytest tests/ -q
 ```
 
-Covers geometry (GMST/LOS), event delays/queues/loss/accounting, metrics edge cases, static routing, intermediate RREP/RERR, OLSR expiry, spatial↔brute equivalence.
+Covers geometry (GMST/LOS), event delays, queue drops, TTL, loss, accounting, metrics edge cases, static routing, reverse-route sequence, intermediate RREP/RERR, OLSR expiry and MPR tie-break, spatial↔brute equivalence.

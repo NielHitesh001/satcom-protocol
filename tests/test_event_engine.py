@@ -5,7 +5,8 @@ Covers propagation delay, serialization delay, queue behaviour, packet loss,
 packet accounting, simulation termination, and same-time event ordering.
 
 Event priority at equal time (lower processes first):
-  topology (0) < tick (1) < inject (2) < arrival (3) < end (9)
+  topology (0) and tx_done (0) < tick (1) < inject (2) < arrival (3) < end (9)
+  Topology is scheduled first, so it precedes tx_done at the same timestamp.
 """
 
 from __future__ import annotations
@@ -158,7 +159,7 @@ def test_opposite_direction_links_independent():
 
 
 def test_congestion_drops_with_tiny_queue(tmp_path):
-    """Very small queue + high rate should produce some drops or residuals."""
+    """A busy link with queue_limit 1 must drop DATA, not only count residuals."""
     path = _write_scenario(
         tmp_path,
         duration_s=60,
@@ -182,6 +183,148 @@ def test_congestion_drops_with_tiny_queue(tmp_path):
     assert total > 0
     assert s["packets_delivered"] + s["packets_dropped"] + s["packets_residual"] == total
     assert s["packets_dropped"] > 0
+
+
+def test_larger_queue_drops_fewer_packets(tmp_path):
+    """queue_limit must change congestion drops, not only the accounting identity."""
+    traffic = [
+        {
+            "flow_id": "burst",
+            "source": "STARLINK-1007",
+            "destination": "STARLINK-1010",
+            "start_s": 1,
+            "duration_s": 30,
+            "rate_pps": 20.0,
+            "packet_size_bytes": 1500,
+        }
+    ]
+    base = _minimal_scenario_dict(
+        tmp_path,
+        duration_s=60,
+        time_step_s=10,
+        traffic=traffic,
+        link={"queue_limit": 1, "capacity_mbps": 0.001, "loss_prob": 0.0},
+    )
+    tiny_path = tmp_path / "scenario_tiny.yaml"
+    wide_path = tmp_path / "scenario_wide.yaml"
+    tiny_path.write_text(yaml.dump(base))
+    base["link"]["queue_limit"] = 64
+    wide_path.write_text(yaml.dump(base))
+    m_tiny = run_scenario(tiny_path, output_dir=tmp_path / "cong_tiny")
+    m_wide = run_scenario(wide_path, output_dir=tmp_path / "cong_wide")
+    d_tiny = m_tiny.summary_dict()["packets_dropped"]
+    d_wide = m_wide.summary_dict()["packets_dropped"]
+    assert d_tiny > d_wide
+    for m in (m_tiny, m_wide):
+        s = m.summary_dict()
+        assert s["packets_delivered"] + s["packets_dropped"] + s["packets_residual"] == s["packets_sent"]
+
+
+def test_data_ttl_zero_is_dropped_and_not_aliased(tmp_path):
+    """DATA with ttl 0 is dropped once. A forwarded copy does not mutate the original."""
+    path = _write_scenario(tmp_path, duration_s=30, time_step_s=30)
+    from config import load_scenario
+    sim = Simulator(load_scenario(path))
+    snap = next((s for s in sim.snapshots if any(s.adj.values())), None)
+    if snap is None:
+        pytest.skip("no links in sample")
+    src = "STARLINK-1007"
+    neighs = sorted(snap.adj.get(src, []))
+    if len(neighs) < 1:
+        pytest.skip("source has no neighbour")
+    nh = neighs[0]
+    dead = Packet(
+        pkt_id=1,
+        src=src,
+        dst="STARLINK-1010",
+        type=PacketType.DATA,
+        size_bytes=256,
+        creation_time_s=0.0,
+        ttl=0,
+        path=[src],
+    )
+    sim._send(0.0, src, nh, dead, snap)
+    assert sim.metrics.flows["f1"].dropped == 1
+    assert not any(ev.kind == "arrival" for ev in sim._event_q)
+    assert dead.ttl == 0
+    assert dead.path == [src]
+
+    live = Packet(
+        pkt_id=2,
+        src=src,
+        dst="STARLINK-1010",
+        type=PacketType.DATA,
+        size_bytes=256,
+        creation_time_s=0.0,
+        ttl=1,
+        path=[src],
+    )
+    sim._send(0.0, src, nh, live, snap)
+    arrivals = [ev for ev in sim._event_q if ev.kind == "arrival"]
+    assert len(arrivals) == 1
+    assert arrivals[0].packet is not live
+    assert arrivals[0].packet.ttl == 0
+    assert live.ttl == 1
+    assert arrivals[0].packet.path == [src, src] or arrivals[0].packet.path[-1] == src
+
+
+def test_fanout_does_not_share_path_list(tmp_path):
+    """Two unicasts of one control packet must not append path onto each other."""
+    path = _write_scenario(tmp_path, duration_s=30, time_step_s=30)
+    from config import load_scenario
+    sim = Simulator(load_scenario(path))
+    snap = next((s for s in sim.snapshots if any(len(v) >= 2 for v in s.adj.values())), None)
+    if snap is None:
+        pytest.skip("no node with two neighbours")
+    src = next(n for n, vs in snap.adj.items() if len(vs) >= 2)
+    n1, n2 = sorted(snap.adj[src])[:2]
+    pkt = Packet(
+        pkt_id=7,
+        src=src,
+        dst="*",
+        type=PacketType.RERR,
+        size_bytes=48,
+        creation_time_s=0.0,
+        ttl=8,
+        path=[src],
+        payload={"unreachable": []},
+    )
+    sim._send(0.0, src, n1, pkt, snap)
+    sim._send(0.0, src, n2, pkt, snap)
+    arrivals = [ev.packet for ev in sim._event_q if ev.kind == "arrival"]
+    assert len(arrivals) == 2
+    assert arrivals[0] is not arrivals[1]
+    assert arrivals[0].path == [src, src]
+    assert arrivals[1].path == [src, src]
+    assert pkt.path == [src]
+
+
+def test_broadcast_payloads_are_independent(tmp_path):
+    """RREQ hop_count updates must not alias across neighbours."""
+    path = _write_scenario(tmp_path, duration_s=30, time_step_s=30)
+    from config import load_scenario
+    sim = Simulator(load_scenario(path))
+    snap = next((s for s in sim.snapshots if any(len(v) >= 2 for v in s.adj.values())), None)
+    if snap is None:
+        pytest.skip("no node with two neighbours")
+    src = next(n for n, vs in snap.adj.items() if len(vs) >= 2)
+    pkt = Packet(
+        pkt_id=8,
+        src=src,
+        dst="*",
+        type=PacketType.RREQ,
+        size_bytes=64,
+        creation_time_s=0.0,
+        ttl=8,
+        path=[src],
+        payload={"hop_count": 0, "origin": src},
+    )
+    sim._send(0.0, src, "__broadcast__", pkt, snap)
+    arrivals = [ev.packet for ev in sim._event_q if ev.kind == "arrival"]
+    assert len(arrivals) >= 2
+    arrivals[0].payload["hop_count"] = 99
+    assert arrivals[1].payload["hop_count"] == 0
+    assert pkt.payload["hop_count"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +435,7 @@ def test_event_loop_terminates(tmp_path):
 
 def test_kind_order_policy():
     assert _KIND_ORDER["topology"] < _KIND_ORDER["tick"]
+    assert _KIND_ORDER["tx_done"] < _KIND_ORDER["tick"]
     assert _KIND_ORDER["tick"] < _KIND_ORDER["inject"]
     assert _KIND_ORDER["inject"] < _KIND_ORDER["arrival"]
     assert _KIND_ORDER["arrival"] < _KIND_ORDER["end"]

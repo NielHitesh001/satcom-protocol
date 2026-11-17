@@ -24,10 +24,12 @@
 |----------|----------|----------|--------|
 | predictive (oracle) | 1.000 | 0 | 0 |
 | practical_predictive | 1.000 | 0 | 288 |
-| aodv | 0.692 | 12 | 174 |
+| aodv | 1.000 | 0 | 179 |
 | olsr | 0.974 | 0 | 15016 |
 
-AODV residual packets are those still buffered after routes were invalidated by topology changes (RERR path). Conservation `sent = delivered + dropped + residual` holds.
+The earlier AODV row (delivery 0.692, residual 12, control 174) was not RERR behaviour. Reverse-route install kept a shorter entry when the origin sequence was newer, so the RREP after expiry never reached the source. Sequence-aware reverse routes deliver all 39 example packets. OLSR control is 15016 with a lexical MPR tie-break (it used to follow set hash order).
+
+Conservation `sent = delivered + dropped + residual` holds.
 
 ## Tests
 `tests/test_routing_phase2.py` — intermediate RREP, RERR, OLSR expiry, lifetime weighting.

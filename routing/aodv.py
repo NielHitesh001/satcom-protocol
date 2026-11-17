@@ -133,7 +133,7 @@ class AODVProtocol(RoutingProtocol):
             self.account_control("RERR", 1, rerr_size)
             self.outbound.append(Outbound(node=node, packet=rerr, next_hop="__broadcast__"))
         else:
-            for t in targets:
+            for t in sorted(targets):
                 self.account_control("RERR", 1, rerr_size)
                 self.outbound.append(
                     Outbound(node=node, packet=rerr, next_hop=t)
@@ -253,13 +253,21 @@ class AODVProtocol(RoutingProtocol):
         hop = p["hop_count"] + 1
         prev_hop = packet.path[-1] if packet.path else origin
 
-        # Reverse route toward origin
+        # Reverse route toward origin. A newer origin sequence must replace a
+        # shorter stale route; otherwise the RREP for this RREQ is stranded
+        # when the old entry expires.
         existing = self.routing_table[node].get(origin)
-        if existing is None or hop < existing.hop_count or existing.expiry_s < time_s:
+        incoming_seq = p["orig_seq"]
+        if (
+            existing is None
+            or existing.expiry_s < time_s
+            or incoming_seq > existing.seq_no
+            or (incoming_seq == existing.seq_no and hop < existing.hop_count)
+        ):
             self.routing_table[node][origin] = RouteEntry(
                 dest=origin,
                 next_hop=prev_hop,
-                seq_no=p["orig_seq"],
+                seq_no=incoming_seq,
                 hop_count=hop,
                 expiry_s=time_s + self.route_timeout_s,
             )

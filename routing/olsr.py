@@ -161,8 +161,8 @@ class OLSRProtocol(RoutingProtocol):
                 ttl=1,
                 path=[node],
                 payload={
-                    "neighbors": list(self.neighbors[node]),
-                    "mpr": list(self.mpr[node]),
+                    "neighbors": sorted(self.neighbors[node]),
+                    "mpr": sorted(self.mpr[node]),
                 },
             )
             self.account_control("HELLO", max(1, len(self.neighbors[node])), pkt.size_bytes)
@@ -184,7 +184,7 @@ class OLSRProtocol(RoutingProtocol):
                 payload={
                     "origin": node,
                     "seq": seq,
-                    "neighbors": list(self.neighbors[node]),
+                    "neighbors": sorted(self.neighbors[node]),
                 },
             )
             self.account_control("TC", max(1, len(self.neighbors[node])), pkt.size_bytes)
@@ -212,13 +212,14 @@ class OLSRProtocol(RoutingProtocol):
 
         selected: Set[str] = set()
         remaining = set(two_hop)
+        # Sorted names: equal coverage must not depend on set hash order.
         while remaining:
             best = None
             best_cover: Set[str] = set()
-            for n1, c in cover.items():
+            for n1 in sorted(cover):
                 if n1 in selected:
                     continue
-                hit = c & remaining
+                hit = cover[n1] & remaining
                 if len(hit) > len(best_cover):
                     best = n1
                     best_cover = hit

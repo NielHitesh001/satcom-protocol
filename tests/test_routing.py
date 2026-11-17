@@ -107,6 +107,16 @@ def test_olsr_converges_on_static_graph():
     assert proto.next_hop("A", "E", 5.0) == "D"
 
 
+def test_olsr_mpr_tie_break_is_lexical():
+    """Equal two-hop coverage selects the lexicographically smaller neighbour."""
+    proto = OLSRProtocol(["A", "B", "C", "D"])
+    proto.neighbors["A"] = {"B", "C"}
+    proto.neighbor_sets["A"]["B"] = {"A", "D"}
+    proto.neighbor_sets["A"]["C"] = {"A", "D"}
+    proto._select_mpr("A")
+    assert proto.mpr["A"] == {"B"}
+
+
 # ---------------------------------------------------------------------------
 # AODV – on-demand: inject a DATA packet, let RREQ/RREP settle, then next_hop
 # ---------------------------------------------------------------------------

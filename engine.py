@@ -275,9 +275,9 @@ class Simulator:
         for n in self.node_names:
             old = self._prev_adj.get(n, set())
             new = snap.adj.get(n, set())
-            for lost in old - new:
+            for lost in sorted(old - new):
                 self.protocol.on_link_change(t, n, lost, up=False)
-            for gained in new - old:
+            for gained in sorted(new - old):
                 self.protocol.on_link_change(t, n, gained, up=True)
         self._prev_adj = {n: set(snap.adj.get(n, set())) for n in self.node_names}
         if isinstance(self.protocol, PracticalPredictiveProtocol):
@@ -359,7 +359,13 @@ class Simulator:
         loss_p = float(self.scenario.link.loss_prob)
 
         if nh == "__broadcast__":
-            for neigh in snap.adj.get(src, []):
+            # One DATA fate for the packet, not one per neighbour.
+            if pkt.type == PacketType.DATA and pkt.ttl <= 0:
+                fid = self._flow_id_for(pkt)
+                if fid:
+                    self.metrics.flows[fid].dropped += 1
+                return
+            for neigh in sorted(snap.adj.get(src, [])):
                 if loss_p > 0 and self.rng.random() < loss_p:
                     self._note_control_loss(pkt)
                     if pkt.type == PacketType.DATA:
@@ -374,11 +380,6 @@ class Simulator:
                 start = max(now, free)
                 # DATA queue: hold a slot until serialization finishes (tx_done).
                 if pkt.type == PacketType.DATA:
-                    if pkt.ttl <= 0:
-                        fid = self._flow_id_for(pkt)
-                        if fid:
-                            self.metrics.flows[fid].dropped += 1
-                        continue
                     qlen = self._link_qlen.get(key, 0)
                     if qlen >= self.queue_limit and start > now:
                         fid = self._flow_id_for(pkt)
@@ -390,18 +391,7 @@ class Simulator:
                 self._link_free_at[key] = start + ser
                 self._note_control_airtime(pkt, ser)
                 arr = start + ser + delay
-                out_ttl = pkt.ttl - 1 if pkt.type == PacketType.DATA else pkt.ttl
-                new_pkt = Packet(
-                    pkt_id=pkt.pkt_id,
-                    src=pkt.src,
-                    dst=pkt.dst,
-                    type=pkt.type,
-                    size_bytes=pkt.size_bytes,
-                    creation_time_s=pkt.creation_time_s,
-                    ttl=out_ttl,
-                    payload=pkt.payload,
-                    path=list(pkt.path) + [src],
-                )
+                new_pkt = self._clone_forward(pkt, src)
                 self._schedule(arr, "arrival", node=neigh, packet=new_pkt)
             return
 
@@ -445,10 +435,26 @@ class Simulator:
         self._link_free_at[key] = start + ser
         self._note_control_airtime(pkt, ser)
         arr = start + ser + delay
-        if pkt.type == PacketType.DATA:
-            pkt.ttl -= 1
-        pkt.path = list(pkt.path) + [src]
-        self._schedule(arr, "arrival", node=nh, packet=pkt)
+        # Own path and payload dict so fan-out and later hops cannot alias.
+        fwd = self._clone_forward(pkt, src)
+        self._schedule(arr, "arrival", node=nh, packet=fwd)
+
+    def _clone_forward(self, pkt: Packet, src: str) -> Packet:
+        payload = pkt.payload
+        if isinstance(payload, dict):
+            payload = dict(payload)
+        ttl = pkt.ttl - 1 if pkt.type == PacketType.DATA else pkt.ttl
+        return Packet(
+            pkt_id=pkt.pkt_id,
+            src=pkt.src,
+            dst=pkt.dst,
+            type=pkt.type,
+            size_bytes=pkt.size_bytes,
+            creation_time_s=pkt.creation_time_s,
+            ttl=ttl,
+            payload=payload,
+            path=list(pkt.path) + [src],
+        )
 
     def _note_control_airtime(self, pkt: Packet, ser_s: float) -> None:
         """Observational airtime for control PDUs that were actually scheduled.

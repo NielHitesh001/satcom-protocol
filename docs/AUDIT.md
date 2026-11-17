@@ -162,7 +162,7 @@ TLE → Satrec → sgp4(jd,fr) TEME → teme_to_ecef(GMST) → ECEF km
 - Packet conservation holds for all protocols including buffered AODV residual.
 
 **Observed behaviour**
-- AODV delivery on the example scenario is lower than the pre-RERR baseline (~0.69 vs 1.0) because link breaks now invalidate multi-hop routes and buffered packets remain residual. This is more accurate than silently keeping stale routes.
+- AODV on `scenarios/example.yaml` (seed 42) delivers 39/39 after reverse routes follow a newer origin sequence. The old ~0.69 delivery / 12 residual figure was a stranded RREP, not RERR. The example run records no `route_fail` events. OLSR control on that scenario is 15016 and does not depend on `PYTHONHASHSEED`.
 
 
 ## Phase 3 status (2026-11-12)

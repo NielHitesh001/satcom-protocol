@@ -110,6 +110,39 @@ def test_aodv_rrep_forwarded_toward_origin():
     assert proto.routing_table["B"]["C"].next_hop == "C"
 
 
+def test_aodv_newer_origin_seq_refreshes_reverse_route():
+    """A longer path with a newer origin sequence must replace a short stale reverse route."""
+    proto = AODVProtocol(NODES)
+    _install(proto)
+    proto.routing_table["B"]["A"] = RouteEntry(
+        dest="A", next_hop="Z", seq_no=1, hop_count=1, expiry_s=10.0
+    )
+    rreq = Packet(
+        pkt_id=3,
+        src="A",
+        dst="C",
+        type=PacketType.RREQ,
+        size_bytes=64,
+        creation_time_s=9.0,
+        ttl=10,
+        path=["D"],
+        payload={
+            "origin": "A",
+            "orig_seq": 2,
+            "rreq_id": 2,
+            "dest": "C",
+            "dest_seq": 0,
+            "hop_count": 4,
+        },
+    )
+    proto.on_packet(9.0, "B", rreq)
+    rev = proto.routing_table["B"]["A"]
+    assert rev.next_hop == "D"
+    assert rev.seq_no == 2
+    assert rev.hop_count == 5
+    assert proto.next_hop("B", "A", 10.5) == "D"
+
+
 def test_aodv_rerr_on_link_break():
     """Link down should invalidate routes and emit RERR."""
     proto = AODVProtocol(NODES)
