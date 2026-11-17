@@ -49,7 +49,7 @@ PYTHONPATH=. python scripts/bench_topology.py
 | `routing/` | AODV, OLSR, practical predictive, oracle predictive |
 | `metrics.py` | Delivery, loss, residual, p50/p95/p99 latency (null if undefined) |
 | `experiments/` | Multi-seed protocol comparison runner |
-| `docs/` | AUDIT, ENGINE, PHASE2–PHASE6 |
+| `docs/` | AUDIT, ENGINE, PHASE2–PHASE7 |
 
 **Event priority (same timestamp):** topology and `tx_done` (queue release), then tick → inject → arrival → end. Same kind breaks ties by insertion order.
 
@@ -121,6 +121,7 @@ Spatial hash vs brute force (synthetic LEO, max_range 3000 km):
 | `docs/PHASE4.md` | Large-constellation profiling |
 | `docs/PHASE5.md` | Connectivity-aware traffic and fair comparison |
 | `docs/PHASE6.md` | Control-byte accounting and sensitivity |
+| `docs/PHASE7.md` | Goodput, hop metrics, comparison scenario |
 
 ---
 
