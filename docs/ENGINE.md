@@ -32,7 +32,17 @@ link_free_at[src,nh] = start_tx + serialization_s
 
 Opposite directions `(u,v)` and `(v,u)` are independent channels.
 
+Broadcast expands to one unicast-like transmission per neighbour.
+
+## Queue and loss
+
+- `queue_limit`: max DATA packets waiting on a directed link; excess are **dropped**.
+- Control packets are not subject to the DATA queue limit.
+- `loss_prob`: Bernoulli drop applied at send time (per hop).
+
 ## Packet fates
+
+Every injected DATA packet ends in exactly one of:
 
 | Fate | Meaning |
 |------|---------|
@@ -42,14 +52,22 @@ Opposite directions `(u,v)` and `(v,u)` are independent channels.
 
 Invariant: `sent = delivered + dropped + residual`.
 
+Residual is **not** counted as a network drop.
+
+## Topology
+
+Topology snapshots are precomputed on a `time_step_s` grid. Packet events use the latest snapshot with `time_s <= event.time`.
+
 ## Metrics conventions
 
 - Latency percentiles: linear interpolation, index `k = (n-1) * p/100`.
 - Undefined latency (no deliveries) → JSON `null`, never `0.0`.
 - `loss_ratio = dropped / sent` (residual excluded).
+- `delivery_ratio = delivered / sent`.
 
 ## Known limitations
 
 - No continuous orbital updates between topology steps.
 - No MAC contention beyond per-link FIFO busy-time.
+- OLSR tick density is tied to `min(time_step_s, hello_interval_s)`.
 - Maximum 5e6 events per run (safety against infinite loops).

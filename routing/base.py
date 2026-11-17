@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Dict, List, Optional, Set
 
+from .control_sizes import ControlSizeModel
+
 
 class PacketType(Enum):
     DATA = auto()
@@ -52,11 +54,37 @@ class RouteEvent:
 class RoutingProtocol(ABC):
     """Abstract base class for all routing protocols."""
 
-    def __init__(self, nodes: List[str]):
+    def __init__(self, nodes: List[str], size_model: Optional[ControlSizeModel] = None):
         self.nodes = set(nodes)
         self._control_sent = 0
         self._control_recv = 0
+        self.size_model = size_model or ControlSizeModel()
+        # Generation accounting (matches control message counts, fanout-based).
+        self.control_bytes_generated = 0
+        self.control_bytes_estimated_not_airtime = 0
+        self.control_msgs_by_type: Dict[str, int] = {}
+        self.control_bytes_by_type: Dict[str, int] = {}
         self.route_events: List[RouteEvent] = []
+
+    def account_control(
+        self,
+        kind: str,
+        count: int,
+        size_bytes: int,
+        *,
+        airtime: bool = True,
+    ) -> None:
+        """Record logical control messages. Does not transmit them."""
+        if count <= 0:
+            return
+        self._control_sent += count
+        self.control_msgs_by_type[kind] = self.control_msgs_by_type.get(kind, 0) + count
+        nbytes = count * int(size_bytes)
+        self.control_bytes_by_type[kind] = self.control_bytes_by_type.get(kind, 0) + nbytes
+        if airtime:
+            self.control_bytes_generated += nbytes
+        else:
+            self.control_bytes_estimated_not_airtime += nbytes
 
     @abstractmethod
     def on_link_change(self, time_s: float, u: str, v: str, up: bool) -> None:

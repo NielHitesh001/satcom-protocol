@@ -9,7 +9,15 @@
 - **No false negatives** for Euclidean range ≤ max_range
 - Auto-enabled when N > 20; override with `use_spatial_index=True/False`
 
-## Benchmark (max_range=3000 km)
+Ground–sat links remain O(G · N) (G is small).
+
+## Vectorized orbital time grid
+
+`orbit.propagate_positions` precomputes Julian dates and GMST angles once
+for the entire time grid (vectorized NumPy), then applies TEME→ECEF per
+satellite. SGP4 itself remains sequential (library constraint).
+
+## Benchmark (synthetic LEO positions, max_range=3000 km)
 
 | N | Brute (ms) | Spatial (ms) | Speedup |
 |--:|-----------:|-------------:|--------:|
@@ -23,4 +31,12 @@ Run: `PYTHONPATH=. python scripts/bench_topology.py`
 
 ## Correctness
 
-Spatial and brute-force modes produce identical edge sets and distances.
+`tests/test_spatial_links.py` asserts edge sets and distances are identical
+between spatial and brute-force modes for N ∈ {25, 40, 80}.
+
+## Remaining limits
+
+- Propagation is still O(N · T) SGP4 calls (no native vector SGP4).
+- Full Starlink (~7k sats) topology still benefits from further work
+  (e.g. finer multi-level grids, sparse CSR adjacency).
+- Event queue is heapq (O(log M)); priority-queue alternatives not yet profiled at scale.

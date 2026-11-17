@@ -138,6 +138,30 @@ def teme_to_ecef(r_teme: np.ndarray, jd: float, fr: float) -> np.ndarray:
     return np.array([x, y, z], dtype=np.float64)
 
 
+def _jd_fr_array(times_utc: List[datetime]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute Julian date, fraction, and GMST cosine/sine for all times."""
+    n = len(times_utc)
+    jd_arr = np.empty(n, dtype=np.float64)
+    fr_arr = np.empty(n, dtype=np.float64)
+    for i, t in enumerate(times_utc):
+        jd, fr = jday(
+            t.year, t.month, t.day,
+            t.hour, t.minute, t.second + t.microsecond * 1e-6,
+        )
+        jd_arr[i] = jd
+        fr_arr[i] = fr
+    # Vectorized GMST
+    T = ((jd_arr - 2451545.0) + fr_arr) / 36525.0
+    gmst_sec = (
+        67310.54841
+        + (876600.0 * 3600.0 + 8640184.812866) * T
+        + 0.093104 * T * T
+        - 6.2e-6 * T * T * T
+    )
+    theta = np.radians((gmst_sec / 240.0) % 360.0)
+    return jd_arr, fr_arr, theta
+
+
 def propagate_positions(
     sats: Dict[str, SatelliteState],
     times_utc: List[datetime],
@@ -153,22 +177,30 @@ def propagate_positions(
     -----
     SGP4 yields TEME; we convert to ECEF via GMST rotation so that
     ground-site geometry (elevation, LOS) is consistent.
-    """
-    result: Dict[str, np.ndarray] = {}
-    n = len(times_utc)
 
+    Julian dates and GMST angles are computed once for the time grid
+    (vectorized), then applied per satellite.
+    """
+    n = len(times_utc)
+    if n == 0:
+        return {name: np.zeros((0, 3)) for name in sats}
+
+    jd_arr, fr_arr, theta = _jd_fr_array(times_utc)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    result: Dict[str, np.ndarray] = {}
     for name, state in sats.items():
-        pos = np.zeros((n, 3), dtype=np.float64)
-        for i, t in enumerate(times_utc):
-            jd, fr = jday(
-                t.year, t.month, t.day,
-                t.hour, t.minute, t.second + t.microsecond * 1e-6,
-            )
-            e, r, v = state.satrec.sgp4(jd, fr)
-            if e == 0:
-                pos[i] = teme_to_ecef(np.asarray(r, dtype=np.float64), jd, fr)
-            else:
-                pos[i] = np.nan
+        pos = np.full((n, 3), np.nan, dtype=np.float64)
+        for i in range(n):
+            e, r, _v = state.satrec.sgp4(float(jd_arr[i]), float(fr_arr[i]))
+            if e != 0:
+                continue
+            x_t, y_t, z_t = float(r[0]), float(r[1]), float(r[2])
+            # TEME → ECEF: rotation about Z by GMST
+            pos[i, 0] = cos_t[i] * x_t + sin_t[i] * y_t
+            pos[i, 1] = -sin_t[i] * x_t + cos_t[i] * y_t
+            pos[i, 2] = z_t
         result[name] = pos
     return result
 

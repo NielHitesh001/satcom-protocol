@@ -1,9 +1,19 @@
-"""Benchmark sat–sat topology: brute force vs spatial hash."""
+"""
+Benchmark sat–sat topology construction: brute force vs spatial hash.
+
+Usage:
+  PYTHONPATH=. python scripts/bench_topology.py
+"""
+
 from __future__ import annotations
+
 import time
+
 import numpy as np
+
 from config import LinkParams
 from links import compute_snapshot
+
 
 def random_sats(n: int, seed: int = 0) -> dict:
     rng = np.random.default_rng(seed)
@@ -19,24 +29,30 @@ def random_sats(n: int, seed: int = 0) -> dict:
         ])
     return positions
 
+
 def main() -> None:
     params = LinkParams(max_range_km=3000.0)
     print(f"{'N':>6} {'brute_ms':>10} {'spatial_ms':>12} {'edges':>8} {'speedup':>8}")
     for n in (20, 50, 100, 200, 400):
         sats = random_sats(n, seed=n)
+        # Warm-up
         compute_snapshot(0.0, sats, {}, params, use_spatial_index=False)
         compute_snapshot(0.0, sats, {}, params, use_spatial_index=True)
+
         t0 = time.perf_counter()
         for _ in range(5):
             b = compute_snapshot(0.0, sats, {}, params, use_spatial_index=False)
         brute_ms = (time.perf_counter() - t0) / 5 * 1000
+
         t0 = time.perf_counter()
         for _ in range(5):
             s = compute_snapshot(0.0, sats, {}, params, use_spatial_index=True)
         spatial_ms = (time.perf_counter() - t0) / 5 * 1000
+
         assert len(b.edges) == len(s.edges)
         speedup = brute_ms / spatial_ms if spatial_ms > 0 else float("inf")
         print(f"{n:6d} {brute_ms:10.2f} {spatial_ms:12.2f} {len(b.edges):8d} {speedup:8.2f}x")
+
 
 if __name__ == "__main__":
     main()

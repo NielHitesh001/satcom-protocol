@@ -1,11 +1,12 @@
 """
 olsr.py – Simplified OLSR-style proactive / link-state routing.
 
-Core ideas kept:
+Core ideas:
   - Periodic HELLO for neighbor sensing
-  - MPR selection (greedy 2-hop cover) so only MPRs retransmit TC
-  - Topology Control (TC) with (origin, seq) duplicate suppression
-  - Dijkstra shortest-path computation from the local topology view
+  - MPR selection (greedy 2-hop cover)
+  - TC with (origin, seq) duplicate suppression and MPR flooding
+  - Topology / neighbor entry expiry (hold_time)
+  - Dijkstra on the local topology view
 
 Not a full RFC 3626 implementation.
 """
@@ -27,15 +28,18 @@ class OLSRProtocol(RoutingProtocol):
         hello_interval_s: float = 2.0,
         tc_interval_s: float = 5.0,
         hold_time_s: float = 15.0,
+        size_model=None,
     ):
-        super().__init__(nodes)
+        super().__init__(nodes, size_model=size_model)
         self.hello_interval_s = hello_interval_s
         self.tc_interval_s = tc_interval_s
         self.hold_time_s = hold_time_s
 
         self.neighbors: Dict[str, Set[str]] = {n: set() for n in nodes}
         self.neighbor_sets: Dict[str, Dict[str, Set[str]]] = {n: {} for n in nodes}
-        self.topology: Dict[str, Dict[str, Set[str]]] = {n: {} for n in nodes}
+        # topology[node][origin] = (neighbor_set, last_update_time)
+        self.topology: Dict[str, Dict[str, Tuple[Set[str], float]]] = {n: {} for n in nodes}
+        self.neighbor_time: Dict[str, Dict[str, float]] = {n: {} for n in nodes}
         self.routing_table: Dict[str, Dict[str, str]] = {n: {} for n in nodes}
         self.mpr: Dict[str, Set[str]] = {n: set() for n in nodes}
         self.mpr_selectors: Dict[str, Set[str]] = {n: set() for n in nodes}
@@ -53,20 +57,51 @@ class OLSRProtocol(RoutingProtocol):
         if up:
             self.neighbors[u].add(v)
             self.neighbors[v].add(u)
+            self.neighbor_time[u][v] = time_s
+            self.neighbor_time[v][u] = time_s
         else:
             self.neighbors[u].discard(v)
             self.neighbors[v].discard(u)
             self.neighbor_sets[u].pop(v, None)
             self.neighbor_sets[v].pop(u, None)
+            self.neighbor_time[u].pop(v, None)
+            self.neighbor_time[v].pop(u, None)
+            self.mpr_selectors[u].discard(v)
+            self.mpr_selectors[v].discard(u)
         self._select_mpr(u)
         self._select_mpr(v)
-        self._recompute(u)
-        self._recompute(v)
+        self._recompute(u, time_s)
+        self._recompute(v, time_s)
 
     def next_hop(self, node: str, destination: str, time_s: float) -> Optional[str]:
         if node == destination:
             return None
         return self.routing_table[node].get(destination)
+
+    def _expire(self, node: str, time_s: float) -> None:
+        """Drop topology and neighbour entries older than hold_time."""
+        stale_topo = [
+            origin
+            for origin, (_neighs, t0) in self.topology[node].items()
+            if time_s - t0 > self.hold_time_s
+        ]
+        for origin in stale_topo:
+            del self.topology[node][origin]
+
+        stale_n = [
+            n
+            for n, t0 in self.neighbor_time[node].items()
+            if time_s - t0 > self.hold_time_s
+        ]
+        for n in stale_n:
+            self.neighbors[node].discard(n)
+            self.neighbor_sets[node].pop(n, None)
+            self.neighbor_time[node].pop(n, None)
+            self.mpr_selectors[node].discard(n)
+
+        # Bound seen_tc size
+        if len(self.seen_tc[node]) > 5000:
+            self.seen_tc[node].clear()
 
     def on_packet(self, time_s: float, node: str, packet: Packet) -> Optional[str]:
         if packet.type == PacketType.DATA:
@@ -80,13 +115,14 @@ class OLSRProtocol(RoutingProtocol):
             reported = set(packet.payload.get("neighbors", []))
             self.neighbor_sets[node][origin] = reported
             self.neighbors[node].add(origin)
-            self.topology[node][origin] = reported
+            self.neighbor_time[node][origin] = time_s
+            self.topology[node][origin] = (reported, time_s)
             if packet.payload.get("mpr") and node in packet.payload["mpr"]:
                 self.mpr_selectors[node].add(origin)
             else:
                 self.mpr_selectors[node].discard(origin)
             self._select_mpr(node)
-            self._recompute(node)
+            self._recompute(node, time_s)
             return None
 
         if packet.type == PacketType.TC:
@@ -98,18 +134,19 @@ class OLSRProtocol(RoutingProtocol):
                 return None
             self.seen_tc[node].add(key)
             reported = set(packet.payload.get("neighbors", []))
-            self.topology[node][origin] = reported
-            self._recompute(node)
+            self.topology[node][origin] = (reported, time_s)
+            self._recompute(node, time_s)
             prev = packet.path[-1] if packet.path else packet.src
             if packet.ttl > 1 and prev in self.mpr_selectors[node]:
                 packet.ttl -= 1
-                self._control_sent += max(0, len(self.neighbors[node]) - 1)
+                self.account_control("TC", max(0, len(self.neighbors[node]) - 1), packet.size_bytes)
                 return "__broadcast__"
             return None
 
         return None
 
     def tick(self, time_s: float, node: str) -> List[Packet]:
+        self._expire(node, time_s)
         out: List[Packet] = []
         if time_s - self.last_hello[node] >= self.hello_interval_s:
             self.last_hello[node] = time_s
@@ -119,7 +156,7 @@ class OLSRProtocol(RoutingProtocol):
                 src=node,
                 dst="*",
                 type=PacketType.HELLO,
-                size_bytes=48,
+                size_bytes=self.size_model.olsr_hello,
                 creation_time_s=time_s,
                 ttl=1,
                 path=[node],
@@ -128,7 +165,7 @@ class OLSRProtocol(RoutingProtocol):
                     "mpr": list(self.mpr[node]),
                 },
             )
-            self._control_sent += max(1, len(self.neighbors[node]))
+            self.account_control("HELLO", max(1, len(self.neighbors[node])), pkt.size_bytes)
             out.append(pkt)
 
         if time_s - self.last_tc[node] >= self.tc_interval_s:
@@ -140,7 +177,7 @@ class OLSRProtocol(RoutingProtocol):
                 src=node,
                 dst="*",
                 type=PacketType.TC,
-                size_bytes=64,
+                size_bytes=self.size_model.olsr_tc,
                 creation_time_s=time_s,
                 ttl=8,
                 path=[node],
@@ -150,12 +187,13 @@ class OLSRProtocol(RoutingProtocol):
                     "neighbors": list(self.neighbors[node]),
                 },
             )
-            self._control_sent += max(1, len(self.neighbors[node]))
+            self.account_control("TC", max(1, len(self.neighbors[node])), pkt.size_bytes)
             out.append(pkt)
+
+        self._recompute(node, time_s)
         return out
 
     def _select_mpr(self, node: str) -> None:
-        """Greedy MPR: cover all 2-hop neighbors with a small set of 1-hop neighbors."""
         one_hop = set(self.neighbors[node])
         two_hop: Set[str] = set()
         for n1 in one_hop:
@@ -190,12 +228,13 @@ class OLSRProtocol(RoutingProtocol):
             remaining -= best_cover
         self.mpr[node] = selected
 
-    def _recompute(self, node: str) -> None:
+    def _recompute(self, node: str, time_s: float = 0.0) -> None:
+        self._expire(node, time_s)
         graph: Dict[str, Set[str]] = defaultdict(set)
         for n in self.neighbors[node]:
             graph[node].add(n)
             graph[n].add(node)
-        for origin, neighs in self.topology[node].items():
+        for origin, (neighs, _t0) in self.topology[node].items():
             for m in neighs:
                 graph[origin].add(m)
                 graph[m].add(origin)
@@ -228,7 +267,7 @@ class OLSRProtocol(RoutingProtocol):
         self.routing_table[node] = table
 
     def state_size(self, node: str) -> int:
-        topo_bytes = sum(len(s) * 8 for s in self.topology[node].values())
+        topo_bytes = sum(len(s) * 8 for s, _t in self.topology[node].values())
         mpr_bytes = len(self.mpr[node]) * 8 + len(self.mpr_selectors[node]) * 8
         return (
             len(self.neighbors[node]) * 16

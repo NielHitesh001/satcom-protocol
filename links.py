@@ -8,6 +8,7 @@ A link exists when:
 
 Sat–sat candidate pairs use a 3-D spatial hash grid (cell size = max_range_km)
 so complexity is O(N · k) instead of O(N²) for sparse LEO graphs.
+When N is small or spatial indexing is disabled, falls back to brute force.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from orbit import WGS84_A, ground_site_ecef
 
 
 C_LIGHT_KM_S = 299792.458  # km/s
+
+# Use spatial index when satellite count exceeds this threshold
 _SPATIAL_THRESHOLD = 20
 
 
@@ -40,9 +43,19 @@ class TopologySnapshot:
     time_s: float
     edges: List[LinkEdge]
     adj: Dict[str, Set[str]]
+    # Undirected key (min, max) -> LinkEdge for O(1) delay/capacity lookup
+    edge_index: Dict[Tuple[str, str], LinkEdge] = None  # type: ignore
+
+    def __post_init__(self):
+        if self.edge_index is None:
+            self.edge_index = {}
+            for e in self.edges:
+                key = (e.u, e.v) if e.u < e.v else (e.v, e.u)
+                self.edge_index[key] = e
 
 
 def los_clear(p1: np.ndarray, p2: np.ndarray, earth_radius_km: float = WGS84_A) -> bool:
+    """True if the segment p1–p2 does not pass closer than Earth radius to origin."""
     d = p2 - p1
     a = float(np.dot(d, d))
     if a < 1e-12:
@@ -54,6 +67,7 @@ def los_clear(p1: np.ndarray, p2: np.ndarray, earth_radius_km: float = WGS84_A) 
 
 
 def elevation_deg(sat_ecef: np.ndarray, ground_ecef: np.ndarray) -> float:
+    """Elevation angle of satellite as seen from ground site (degrees)."""
     los = sat_ecef - ground_ecef
     up = ground_ecef / np.linalg.norm(ground_ecef)
     cos_zenith = np.dot(los, up) / np.linalg.norm(los)
@@ -75,17 +89,27 @@ def _candidate_pairs_spatial(
     sat_positions: Dict[str, np.ndarray],
     max_range_km: float,
 ) -> List[Tuple[str, str]]:
+    """
+    Return undirected candidate pairs that may be within max_range_km.
+
+    Grid cell size = max_range_km; each satellite is checked against others
+    in its cell and the 26 neighbouring cells. Guarantees no false negatives
+    for Euclidean range ≤ max_range_km.
+    """
     cell_size = max(max_range_km, 1.0)
     grid: Dict[Tuple[int, int, int], List[str]] = defaultdict(list)
     valid_names: List[str] = []
+
     for name in sat_names:
         p = sat_positions[name]
         if np.any(np.isnan(p)):
             continue
         grid[_cell_key(p, cell_size)].append(name)
         valid_names.append(name)
+
     pairs: List[Tuple[str, str]] = []
     seen: Set[Tuple[str, str]] = set()
+
     for name in valid_names:
         p = sat_positions[name]
         cx, cy, cz = _cell_key(p, cell_size)
@@ -127,10 +151,18 @@ def compute_snapshot(
     include_ground_sat: bool = True,
     use_spatial_index: Optional[bool] = None,
 ) -> TopologySnapshot:
+    """
+    Build the instantaneous topology at one time step.
+
+    use_spatial_index
+        None → auto (spatial when N > threshold)
+        True / False → force on / off
+    """
     edges: List[LinkEdge] = []
     adj: Dict[str, Set[str]] = {
         n: set() for n in list(sat_positions) + list(ground_positions)
     }
+
     sat_names = list(sat_positions.keys())
     gnd_names = list(ground_positions.keys())
 
@@ -140,10 +172,12 @@ def compute_snapshot(
             use_spatial = n > _SPATIAL_THRESHOLD
         else:
             use_spatial = use_spatial_index
+
         if use_spatial:
             pairs = _candidate_pairs_spatial(sat_names, sat_positions, params.max_range_km)
         else:
             pairs = _candidate_pairs_bruteforce(sat_names, sat_positions)
+
         for u, v in pairs:
             p1, p2 = sat_positions[u], sat_positions[v]
             dist = float(np.linalg.norm(p2 - p1))
@@ -176,10 +210,15 @@ def compute_snapshot(
                 adj[g].add(s)
                 adj[s].add(g)
 
-    return TopologySnapshot(time_s=time_s, edges=edges, adj=adj)
+    edge_index: Dict[Tuple[str, str], LinkEdge] = {}
+    for e in edges:
+        key = (e.u, e.v) if e.u < e.v else (e.v, e.u)
+        edge_index[key] = e
+    return TopologySnapshot(time_s=time_s, edges=edges, adj=adj, edge_index=edge_index)
 
 
 def build_ground_positions(sites) -> Dict[str, np.ndarray]:
+    """Convert list of GroundSite objects to ECEF dict."""
     return {
         s.name: ground_site_ecef(s.lat_deg, s.lon_deg, s.alt_m)
         for s in sites

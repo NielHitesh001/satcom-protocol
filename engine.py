@@ -32,8 +32,10 @@ from routing import (
     RoutingProtocol,
 )
 from routing.base import Packet, PacketType
+from routing.control_sizes import ControlSizeModel
 from traffic import TrafficGenerator
 
+# Event kind priorities at equal time (lower = earlier)
 _KIND_ORDER = {
     "topology": 0,
     "tick": 1,
@@ -49,6 +51,7 @@ class Event:
     order: int
     seq: int
     kind: str = field(compare=False)
+    # payload
     node: str = field(default="", compare=False)
     packet: Optional[Packet] = field(default=None, compare=False)
     next_hop: str = field(default="", compare=False)
@@ -110,7 +113,9 @@ class Simulator:
         self.traffic_gen = TrafficGenerator(scenario.traffic, scenario.seed)
         self.traffic_events = self.traffic_gen.generate(scenario.duration_s)
 
+        # Per-directed-link time when the channel becomes free (serialization)
         self._link_free_at: Dict[Tuple[str, str], float] = {}
+        # Max packets waiting on a directed link (0 = unlimited for control)
         self.queue_limit = int(getattr(scenario.link, "queue_limit", 64) or 64)
         self._link_qlen: Dict[Tuple[str, str], int] = {}
 
@@ -137,42 +142,53 @@ class Simulator:
         except Exception:
             return datetime(2026, 1, 1, tzinfo=timezone.utc)
 
+    def _size_model(self) -> ControlSizeModel:
+        return ControlSizeModel.from_dict(getattr(self.scenario, "control_sizes", None))
+
     def _make_protocol(self) -> RoutingProtocol:
         proto = self.scenario.protocol.lower()
+        sizes = self._size_model()
         if proto == "aodv":
-            return AODVProtocol(self.node_names)
+            return AODVProtocol(self.node_names, size_model=sizes)
         if proto == "olsr":
-            return OLSRProtocol(self.node_names)
+            return OLSRProtocol(self.node_names, size_model=sizes)
         if proto in ("predictive", "oracle", "predictive_oracle"):
             p = PredictiveProtocol(self.node_names)
             p.load_snapshots(self.snapshots)
             return p
         if proto in ("practical_predictive", "predictive_practical"):
-            return PracticalPredictiveProtocol(self.node_names)
+            return PracticalPredictiveProtocol(self.node_names, size_model=sizes)
         raise ValueError(f"Unknown protocol: {proto}")
 
     def _snap_at(self, time_s: float) -> TopologySnapshot:
+        """Latest topology snapshot with time_s <= t."""
         idx = int(time_s / self.scenario.time_step_s)
         idx = max(0, min(idx, len(self.snapshots) - 1))
+        # Prefer exact floor
         while idx + 1 < len(self.snapshots) and self.snapshots[idx + 1].time_s <= time_s:
             idx += 1
         return self.snapshots[idx]
 
     def _edge_params(self, snap: TopologySnapshot, u: str, v: str) -> Tuple[float, float]:
-        for e in snap.edges:
-            if (e.u == u and e.v == v) or (e.v == u and e.u == v):
-                return e.delay_s, e.capacity_mbps
+        """Return (prop_delay_s, capacity_mbps) for undirected edge u–v."""
+        key = (u, v) if u < v else (v, u)
+        e = snap.edge_index.get(key) if snap.edge_index else None
+        if e is not None:
+            return e.delay_s, e.capacity_mbps
+        # Fallback: light-time for 1000 km, default capacity
         return 1000.0 / 299792.458, self.scenario.link.capacity_mbps
 
     def run(self) -> RunMetrics:
         duration = self.scenario.duration_s
 
+        # Seed event queue
         for i, snap in enumerate(self.snapshots):
             self._schedule(snap.time_s, "topology", snap_idx=i)
         for te in self.traffic_events:
             if te.time_s <= duration:
                 self._schedule(te.time_s, "inject", packet=te.packet, node=te.packet.src)
         if isinstance(self.protocol, OLSRProtocol):
+            # Schedule ticks on the topology grid (and optionally denser)
             tick_dt = min(self.scenario.time_step_s, self.protocol.hello_interval_s)
             t = 0.0
             while t <= duration:
@@ -199,6 +215,7 @@ class Simulator:
             elif ev.kind == "arrival":
                 self._handle_arrival(ev)
 
+        # Residuals: packets still scheduled past end, or never delivered
         while self._event_q:
             ev = heapq.heappop(self._event_q)
             if ev.kind == "arrival" and ev.packet and ev.packet.type == PacketType.DATA:
@@ -206,8 +223,29 @@ class Simulator:
                 if fid:
                     self.metrics.flows[fid].residual += 1
 
+        # AODV may still hold DATA in discovery buffers
+        if isinstance(self.protocol, AODVProtocol):
+            for _node, by_dest in self.protocol.buffer.items():
+                for _dest, pkts in by_dest.items():
+                    for pkt in pkts:
+                        if pkt.type == PacketType.DATA:
+                            fid = self._flow_id_for(pkt)
+                            if fid:
+                                self.metrics.flows[fid].residual += 1
+
         self.metrics.control_messages_sent = self.protocol.control_messages_sent()
         self.metrics.control_messages_recv = self.protocol.control_messages_received()
+        self.metrics.control_bytes_sent = getattr(self.protocol, "control_bytes_generated", 0)
+        self.metrics.control_bytes_estimated_not_airtime = getattr(
+            self.protocol, "control_bytes_estimated_not_airtime", 0
+        )
+        self.metrics.control_msgs_by_type = dict(getattr(self.protocol, "control_msgs_by_type", {}))
+        self.metrics.control_bytes_by_type = dict(getattr(self.protocol, "control_bytes_by_type", {}))
+        sm = getattr(self.protocol, "size_model", None)
+        if sm is not None and hasattr(sm, "as_dict"):
+            self.metrics.control_size_model = sm.as_dict()
+        else:
+            self.metrics.control_size_model = ControlSizeModel().as_dict()
         self.metrics.route_changes = sum(
             1 for e in self.protocol.route_events if e.event_type == "route_change"
         )
@@ -263,6 +301,8 @@ class Simulator:
         flow_id = self._flow_id_for(pkt)
         if flow_id:
             self.metrics.flows[flow_id].sent += 1
+            if pkt.type == PacketType.DATA:
+                self.metrics.data_bytes_injected += pkt.size_bytes
         nh = self.protocol.on_packet(t, pkt.src, pkt)
         if nh is None:
             if pkt.src == pkt.dst and flow_id:
@@ -317,6 +357,7 @@ class Simulator:
         if nh == "__broadcast__":
             for neigh in snap.adj.get(src, []):
                 if loss_p > 0 and self.rng.random() < loss_p:
+                    self._note_control_loss(pkt)
                     if pkt.type == PacketType.DATA:
                         fid = self._flow_id_for(pkt)
                         if fid:
@@ -327,6 +368,7 @@ class Simulator:
                 key = (src, neigh)
                 free = self._link_free_at.get(key, now)
                 start = max(now, free)
+                # Simple queue limit for DATA only
                 if pkt.type == PacketType.DATA:
                     qlen = self._link_qlen.get(key, 0)
                     if qlen >= self.queue_limit and start > now:
@@ -336,6 +378,7 @@ class Simulator:
                         continue
                     self._link_qlen[key] = qlen + 1
                 self._link_free_at[key] = start + ser
+                self._note_control_airtime(pkt, ser)
                 arr = start + ser + delay
                 new_pkt = Packet(
                     pkt_id=pkt.pkt_id,
@@ -351,7 +394,9 @@ class Simulator:
                 self._schedule(arr, "arrival", node=neigh, packet=new_pkt)
             return
 
+        # Unicast
         if nh not in snap.adj.get(src, set()):
+            # Link gone — drop DATA
             if pkt.type == PacketType.DATA:
                 fid = self._flow_id_for(pkt)
                 if fid:
@@ -359,6 +404,7 @@ class Simulator:
             return
 
         if loss_p > 0 and self.rng.random() < loss_p:
+            self._note_control_loss(pkt)
             if pkt.type == PacketType.DATA:
                 fid = self._flow_id_for(pkt)
                 if fid:
@@ -379,12 +425,31 @@ class Simulator:
                 return
             self._link_qlen[key] = qlen + 1
         self._link_free_at[key] = start + ser
+        self._note_control_airtime(pkt, ser)
         arr = start + ser + delay
         pkt.path = list(pkt.path) + [src]
         self._schedule(arr, "arrival", node=nh, packet=pkt)
 
+        # Decrement queue when transmission starts (approximate)
         if pkt.type == PacketType.DATA:
             self._link_qlen[key] = max(0, self._link_qlen.get(key, 1) - 1)
+
+    def _note_control_airtime(self, pkt: Packet, ser_s: float) -> None:
+        """Observational airtime for control PDUs that were actually scheduled.
+
+        Queue policy is unchanged: only DATA is subject to queue_limit.
+        Control shares link busy time (serialization) with data.
+        """
+        if pkt.type == PacketType.DATA:
+            return
+        self.metrics.control_airtime_bytes += int(pkt.size_bytes)
+        self.metrics.control_airtime_tx += 1
+        self.metrics.control_serialization_s += float(ser_s)
+
+    def _note_control_loss(self, pkt: Packet) -> None:
+        if pkt.type == PacketType.DATA:
+            return
+        self.metrics.control_loss_tx += 1
 
     def _flow_id_for(self, pkt: Packet) -> Optional[str]:
         for f in self.scenario.traffic:

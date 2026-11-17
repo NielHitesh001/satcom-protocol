@@ -1,15 +1,14 @@
 """
 aodv.py – Simplified AODV-style on-demand routing.
 
-Implements the core ideas:
-  - Route Request (RREQ) flooding
-  - Route Reply (RREP) unicasting
+Implements:
+  - Route Request (RREQ) flooding with duplicate suppression
+  - Destination and intermediate RREP
   - Sequence numbers & route expiry
-  - Basic RERR on link breakage
-  - Data buffering during discovery
+  - RERR on link breakage (precursor notification)
+  - DATA buffering during discovery
 
-This is intentionally simplified for the simulator; it is not a full
-RFC 3561 implementation.
+Not a full RFC 3561 implementation.
 """
 
 from __future__ import annotations
@@ -47,12 +46,15 @@ class AODVProtocol(RoutingProtocol):
         rreq_retries: int = 2,
         net_diameter: int = 15,
         buffer_limit: int = 32,
+        allow_intermediate_rrep: bool = True,
+        size_model=None,
     ):
-        super().__init__(nodes)
+        super().__init__(nodes, size_model=size_model)
         self.route_timeout_s = route_timeout_s
         self.rreq_retries = rreq_retries
         self.net_diameter = net_diameter
         self.buffer_limit = buffer_limit
+        self.allow_intermediate_rrep = allow_intermediate_rrep
 
         self.routing_table: Dict[str, Dict[str, RouteEntry]] = {n: {} for n in nodes}
         self.seq_no: Dict[str, int] = {n: 0 for n in nodes}
@@ -90,21 +92,61 @@ class AODVProtocol(RoutingProtocol):
         else:
             self.neighbors[u].discard(v)
             self.neighbors[v].discard(u)
-            self._invalidate_via(time_s, u, v)
-            self._invalidate_via(time_s, v, u)
+            self._invalidate_and_rerr(time_s, u, v)
+            self._invalidate_and_rerr(time_s, v, u)
 
-    def _invalidate_via(self, time_s: float, node: str, broken_next: str) -> None:
+    def _invalidate_and_rerr(self, time_s: float, node: str, broken_next: str) -> None:
+        """Remove routes via broken_next and emit RERR to precursors."""
         table = self.routing_table[node]
-        to_remove = [d for d, e in table.items() if e.next_hop == broken_next]
+        unreachable: List[Tuple[str, int]] = []
+        precursors: Set[str] = set()
+        to_remove = []
+        for d, e in table.items():
+            if e.next_hop == broken_next:
+                unreachable.append((d, e.seq_no))
+                precursors |= e.precursors
+                to_remove.append(d)
+                self.record_event(time_s, "route_fail", node, d, f"link to {broken_next} down")
         for d in to_remove:
             del table[d]
-            self.record_event(time_s, "route_fail", node, d, f"link to {broken_next} down")
+
+        if not unreachable:
+            return
+
+        # Emit RERR to precursors (and broadcast if none tracked)
+        rerr_size = self.size_model.rerr_size(len(unreachable))
+        rerr = Packet(
+            pkt_id=self._new_pkt_id(),
+            src=node,
+            dst="*",
+            type=PacketType.RERR,
+            size_bytes=rerr_size,
+            creation_time_s=time_s,
+            ttl=8,
+            path=[node],
+            payload={
+                "unreachable": [{"dest": d, "seq": s} for d, s in unreachable],
+            },
+        )
+        targets = precursors if precursors else set(self.neighbors[node])
+        if not targets:
+            self.account_control("RERR", 1, rerr_size)
+            self.outbound.append(Outbound(node=node, packet=rerr, next_hop="__broadcast__"))
+        else:
+            for t in targets:
+                self.account_control("RERR", 1, rerr_size)
+                self.outbound.append(
+                    Outbound(node=node, packet=rerr, next_hop=t)
+                )
 
     def next_hop(self, node: str, destination: str, time_s: float) -> Optional[str]:
         if node == destination:
             return None
         entry = self.routing_table[node].get(destination)
-        if entry is None or entry.expiry_s < time_s:
+        if entry is None:
+            return None
+        if entry.expiry_s < time_s:
+            del self.routing_table[node][destination]
             return None
         return entry.next_hop
 
@@ -115,6 +157,8 @@ class AODVProtocol(RoutingProtocol):
             return self._handle_rreq(time_s, node, packet)
         if packet.type == PacketType.RREP:
             return self._handle_rrep(time_s, node, packet)
+        if packet.type == PacketType.RERR:
+            return self._handle_rerr(time_s, node, packet)
         return None
 
     def _handle_data(self, time_s: float, node: str, packet: Packet) -> Optional[str]:
@@ -122,6 +166,11 @@ class AODVProtocol(RoutingProtocol):
             return None
         nh = self.next_hop(node, packet.dst, time_s)
         if nh is not None:
+            # Track precursor: who sent us this packet may need RERR later
+            prev = packet.path[-1] if packet.path else None
+            entry = self.routing_table[node].get(packet.dst)
+            if entry is not None and prev and prev != node:
+                entry.precursors.add(prev)
             return nh
         buf = self.buffer[node][packet.dst]
         if len(buf) < self.buffer_limit:
@@ -135,12 +184,16 @@ class AODVProtocol(RoutingProtocol):
     def _emit_rreq(self, time_s: float, origin: str, dest: str) -> None:
         self.seq_no[origin] += 1
         self.rreq_id[origin] += 1
+        dest_seq = 0
+        existing = self.routing_table[origin].get(dest)
+        if existing is not None:
+            dest_seq = existing.seq_no
         rreq = Packet(
             pkt_id=self._new_pkt_id(),
             src=origin,
             dst=dest,
             type=PacketType.RREQ,
-            size_bytes=64,
+            size_bytes=self.size_model.aodv_rreq,
             creation_time_s=time_s,
             ttl=self.net_diameter,
             path=[origin],
@@ -149,12 +202,43 @@ class AODVProtocol(RoutingProtocol):
                 "orig_seq": self.seq_no[origin],
                 "rreq_id": self.rreq_id[origin],
                 "dest": dest,
-                "dest_seq": 0,
+                "dest_seq": dest_seq,
                 "hop_count": 0,
             },
         )
-        self._control_sent += max(1, len(self.neighbors[origin]))
+        self.account_control("RREQ", max(1, len(self.neighbors[origin])), rreq.size_bytes)
         self.outbound.append(Outbound(node=origin, packet=rreq, next_hop="__broadcast__"))
+
+    def _emit_rrep(
+        self,
+        time_s: float,
+        node: str,
+        origin: str,
+        dest: str,
+        dest_seq: int,
+        hop_count: int,
+        lifetime: float,
+    ) -> None:
+        rrep = Packet(
+            pkt_id=self._new_pkt_id(),
+            src=node,
+            dst=origin,
+            type=PacketType.RREP,
+            size_bytes=self.size_model.aodv_rrep,
+            creation_time_s=time_s,
+            path=[node],
+            payload={
+                "dest": dest,
+                "dest_seq": dest_seq,
+                "origin": origin,
+                "hop_count": hop_count,
+                "lifetime": lifetime,
+            },
+        )
+        nh = self.next_hop(node, origin, time_s)
+        if nh:
+            self.account_control("RREP", 1, rrep.size_bytes)
+            self.outbound.append(Outbound(node=node, packet=rrep, next_hop=nh))
 
     def _handle_rreq(self, time_s: float, node: str, packet: Packet) -> Optional[str]:
         p = packet.payload
@@ -169,6 +253,7 @@ class AODVProtocol(RoutingProtocol):
         hop = p["hop_count"] + 1
         prev_hop = packet.path[-1] if packet.path else origin
 
+        # Reverse route toward origin
         existing = self.routing_table[node].get(origin)
         if existing is None or hop < existing.hop_count or existing.expiry_s < time_s:
             self.routing_table[node][origin] = RouteEntry(
@@ -178,35 +263,46 @@ class AODVProtocol(RoutingProtocol):
                 hop_count=hop,
                 expiry_s=time_s + self.route_timeout_s,
             )
+        else:
+            existing.precursors.add(prev_hop)
 
-        if node == p["dest"]:
+        dest = p["dest"]
+
+        # Destination generates RREP
+        if node == dest:
             self.seq_no[node] += 1
-            rrep = Packet(
-                pkt_id=self._new_pkt_id(),
-                src=node,
-                dst=origin,
-                type=PacketType.RREP,
-                size_bytes=64,
-                creation_time_s=time_s,
-                path=[node],
-                payload={
-                    "dest": node,
-                    "dest_seq": self.seq_no[node],
-                    "origin": origin,
-                    "hop_count": 0,
-                    "lifetime": self.route_timeout_s,
-                },
+            self._emit_rrep(
+                time_s, node, origin, dest,
+                dest_seq=self.seq_no[node],
+                hop_count=0,
+                lifetime=self.route_timeout_s,
             )
-            nh = self.next_hop(node, origin, time_s)
-            if nh:
-                self._control_sent += 1
-                self.outbound.append(Outbound(node=node, packet=rrep, next_hop=nh))
             return None
+
+        # Intermediate RREP if we have a fresh route to dest
+        if self.allow_intermediate_rrep:
+            route = self.routing_table[node].get(dest)
+            if (
+                route is not None
+                and route.expiry_s >= time_s
+                and route.seq_no >= p.get("dest_seq", 0)
+                and route.hop_count >= 1
+            ):
+                # Gratuitous RREP toward dest is omitted; reply toward origin
+                self._emit_rrep(
+                    time_s, node, origin, dest,
+                    dest_seq=route.seq_no,
+                    hop_count=route.hop_count,
+                    lifetime=route.expiry_s - time_s,
+                )
+                # Record precursor on the forward route
+                route.precursors.add(prev_hop)
+                return None
 
         if packet.ttl > 1:
             packet.ttl -= 1
             p["hop_count"] = hop
-            self._control_sent += max(0, len(self.neighbors[node]) - 1)
+            self.account_control("RREQ", max(0, len(self.neighbors[node]) - 1), packet.size_bytes)
             return "__broadcast__"
         return None
 
@@ -226,6 +322,8 @@ class AODVProtocol(RoutingProtocol):
                 hop_count=hop,
                 expiry_s=time_s + p["lifetime"],
             )
+        else:
+            existing.precursors.add(prev)
 
         if node == p["origin"]:
             self.pending[node].pop(dest, None)
@@ -240,11 +338,67 @@ class AODVProtocol(RoutingProtocol):
         nh = self.next_hop(node, p["origin"], time_s)
         if nh:
             p["hop_count"] = hop
-            self._control_sent += 1
-            return nh
+            self.account_control("RREP", 1, packet.size_bytes)
+        return None
+
+    def _handle_rerr(self, time_s: float, node: str, packet: Packet) -> Optional[str]:
+        self._control_recv += 1
+        unreachable = packet.payload.get("unreachable", [])
+        if not unreachable:
+            return None
+
+        table = self.routing_table[node]
+        newly_unreachable: List[Tuple[str, int]] = []
+        precursors: Set[str] = set()
+        for item in unreachable:
+            dest = item["dest"]
+            seq = item.get("seq", 0)
+            entry = table.get(dest)
+            if entry is None:
+                continue
+            # Invalidate if this route used a next hop that led toward the broken path
+            # Simplified: invalidate if seq is not older
+            if entry.seq_no <= seq or entry.expiry_s < time_s:
+                precursors |= entry.precursors
+                newly_unreachable.append((dest, max(entry.seq_no, seq)))
+                del table[dest]
+                self.record_event(time_s, "route_fail", node, dest, "RERR")
+
+        if not newly_unreachable or packet.ttl <= 1:
+            return None
+
+        # Propagate RERR upstream
+        packet.ttl -= 1
+        packet.payload = {
+            "unreachable": [{"dest": d, "seq": s} for d, s in newly_unreachable],
+        }
+        targets = precursors if precursors else set(self.neighbors[node]) - {packet.path[-1] if packet.path else ""}
+        if not targets:
+            self.account_control("RERR", 1, packet.size_bytes)
+            return "__broadcast__"
+        # Unicast to each precursor via outbound
+        for t in targets:
+            self.account_control("RERR", 1, packet.size_bytes)
+            self.outbound.append(
+                Outbound(
+                    node=node,
+                    packet=Packet(
+                        pkt_id=self._new_pkt_id(),
+                        src=node,
+                        dst="*",
+                        type=PacketType.RERR,
+                        size_bytes=packet.size_bytes,
+                        creation_time_s=time_s,
+                        ttl=packet.ttl,
+                        path=list(packet.path) + [node],
+                        payload=packet.payload,
+                    ),
+                    next_hop=t,
+                )
+            )
         return None
 
     def state_size(self, node: str) -> int:
         n_routes = len(self.routing_table[node])
         n_buf = sum(len(v) for v in self.buffer[node].values())
-        return n_routes * 40 + n_buf * 64 + 64
+        return n_routes * 48 + n_buf * 64 + 64

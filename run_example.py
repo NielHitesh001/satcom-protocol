@@ -5,8 +5,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from engine import run_scenario
-from analysis import plot_delivery_ratio, plot_latency, plot_control_overhead
+# Allow running as `python -m satellite_adhoc_sim.run_example`
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from satellite_adhoc_sim.engine import run_scenario
+from satellite_adhoc_sim.analysis import plot_delivery_ratio, plot_latency, plot_control_overhead
 
 
 def main() -> None:

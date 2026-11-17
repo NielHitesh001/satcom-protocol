@@ -88,7 +88,19 @@ class RunMetrics:
     flows: Dict[str, FlowMetrics] = field(default_factory=dict)
     control_messages_sent: int = 0
     control_messages_recv: int = 0
+    # Generation-side bytes for messages that are actually transmitted (airtime model).
     control_bytes_sent: int = 0
+    # Bytes of control PDUs that the engine scheduled onto a link (measured model airtime).
+    control_airtime_bytes: int = 0
+    control_airtime_tx: int = 0
+    control_loss_tx: int = 0
+    control_serialization_s: float = 0.0
+    # Estimates that never entered the link (practical predictive refresh, link notify).
+    control_bytes_estimated_not_airtime: int = 0
+    control_msgs_by_type: Dict[str, int] = field(default_factory=dict)
+    control_bytes_by_type: Dict[str, int] = field(default_factory=dict)
+    control_size_model: Dict[str, object] = field(default_factory=dict)
+    data_bytes_injected: int = 0
     peak_state_bytes: Dict[str, int] = field(default_factory=dict)
     route_changes: int = 0
     discovery_times_s: List[float] = field(default_factory=list)
@@ -101,6 +113,9 @@ class RunMetrics:
         total_res = sum(f.residual for f in self.flows.values())
         all_lat = [l for f in self.flows.values() for l in f.latencies_s]
         all_hops = [h for f in self.flows.values() for h in f.hop_counts]
+
+        def _or_none(x: Optional[float]) -> Optional[float]:
+            return None if x is None else x
 
         mean_lat = sum(all_lat) / len(all_lat) if all_lat else None
         return {
@@ -123,6 +138,23 @@ class RunMetrics:
             "control_sent": self.control_messages_sent,
             "control_recv": self.control_messages_recv,
             "control_bytes_sent": self.control_bytes_sent,
+            "control_airtime_bytes": self.control_airtime_bytes,
+            "control_airtime_tx": self.control_airtime_tx,
+            "control_loss_tx": self.control_loss_tx,
+            "control_serialization_s": self.control_serialization_s,
+            "control_bytes_estimated_not_airtime": self.control_bytes_estimated_not_airtime,
+            "control_msgs_by_type": self.control_msgs_by_type,
+            "control_bytes_by_type": self.control_bytes_by_type,
+            "control_size_model": self.control_size_model,
+            "data_bytes_injected": self.data_bytes_injected,
+            "control_to_data_byte_ratio": (
+                self.control_airtime_bytes / self.data_bytes_injected
+                if self.data_bytes_injected
+                else None
+            ),
+            "control_airtime_bytes_per_delivered": (
+                self.control_airtime_bytes / total_del if total_del else None
+            ),
             "route_changes": self.route_changes,
             "mean_discovery_s": (
                 sum(self.discovery_times_s) / len(self.discovery_times_s)

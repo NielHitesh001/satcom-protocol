@@ -133,6 +133,7 @@ def test_packet_conservation_predictive(scenario_file, tmp_path):
     total_sent = sum(f.sent for f in metrics.flows.values())
     total_del = sum(f.delivered for f in metrics.flows.values())
     total_drop = sum(f.dropped for f in metrics.flows.values())
-    # Every injected packet is either delivered or dropped
-    assert total_sent == total_del + total_drop
+    total_res = sum(getattr(f, "residual", 0) for f in metrics.flows.values())
+    # Every injected packet is delivered, dropped, or residual at end
+    assert total_sent == total_del + total_drop + total_res
     assert total_sent > 0

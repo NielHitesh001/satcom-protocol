@@ -2,7 +2,7 @@
 Unit tests for metrics aggregation paths.
 
 Percentile convention: linear interpolation on sorted samples,
-index k = (n-1) * p/100.
+index k = (n-1) * p/100  (same as numpy default percentile for common cases).
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ def test_percentile_single():
 
 
 def test_percentile_median_even():
+    # sorted [1,2,3,4], median interpolates between 2 and 3
     m = _percentile([1.0, 2.0, 3.0, 4.0], 50)
     assert m is not None
     assert abs(m - 2.5) < 1e-12
@@ -51,7 +52,7 @@ def test_empty_flow_ratios_zero():
 def test_residual_not_counted_as_drop():
     f = FlowMetrics(flow_id="x", src="a", dst="b", sent=10, delivered=5, dropped=2, residual=3)
     assert f.sent == f.delivered + f.dropped + f.residual
-    assert f.loss_ratio == 0.2
+    assert f.loss_ratio == 0.2  # 2/10, residual excluded
     assert f.delivery_ratio == 0.5
 
 

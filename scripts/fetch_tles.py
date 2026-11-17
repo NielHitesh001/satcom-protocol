@@ -46,6 +46,7 @@ def main() -> None:
     text = fetch(args.url)
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
 
+    # Keep 3-line groups (name + L1 + L2)
     blocks = []
     i = 0
     while i < len(lines):

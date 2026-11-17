@@ -52,6 +52,7 @@ def run_matrix(
                 data["max_sats"] = max_sats
             if duration_s is not None:
                 data["duration_s"] = duration_s
+            # Resolve tle relative to original scenario
             tle = Path(data["tle_path"])
             if not tle.is_absolute():
                 data["tle_path"] = str((scenario_path.parent / tle).resolve())
@@ -65,6 +66,7 @@ def run_matrix(
                 f"lat={s['mean_latency_s']} ctrl={s['control_sent']}"
             )
 
+    # Write flat CSV of all runs
     csv_path = out_dir / "all_runs.csv"
     if rows:
         keys = list(rows[0].keys())
@@ -73,6 +75,7 @@ def run_matrix(
             w.writeheader()
             w.writerows(rows)
 
+    # Aggregate by protocol
     by_proto: Dict[str, List[dict]] = {}
     for r in rows:
         by_proto.setdefault(r["protocol"], []).append(r)
