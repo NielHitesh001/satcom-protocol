@@ -1,0 +1,48 @@
+# Multi-protocol comparison on a synthetic Walker LEO mesh.
+# Synthetic TLEs only — suitable for controlled scaling / protocol ranking,
+# not for claiming operational constellation fidelity.
+name: walker_compare_n30
+start_time_utc: "2026-01-01T00:00:00Z"
+duration_s: 120
+time_step_s: 15
+# Leave tle_path empty so constellation generator is used when supported;
+# experiments that need an explicit TLE can point at a generated file.
+tle_path: data/starlink_sample.tle
+tle_snapshot_id: synthetic-walker-n30
+max_sats: 30
+protocol: practical_predictive
+seed: 42
+
+# Optional Walker-style overrides consumed by constellation helpers / runners
+constellation:
+  type: walker
+  n_sats: 30
+  n_planes: 6
+  altitude_km: 550
+  inclination_deg: 53.0
+  max_range_km: 5000.0
+
+link:
+  max_range_km: 5000.0
+  min_elevation_deg: 25.0
+  capacity_mbps: 100.0
+  loss_prob: 0.0
+  queue_limit: 64
+
+# Fixed endpoints kept for reproducibility; prefer connectivity-aware
+# selection in experiments/phase5_matrix.py or full_scale_sim.py for fairness.
+traffic:
+  - flow_id: f1
+    source: STARLINK-1007
+    destination: STARLINK-1020
+    start_s: 5
+    duration_s: 90
+    rate_pps: 0.5
+    packet_size_bytes: 512
+  - flow_id: f2
+    source: STARLINK-1010
+    destination: STARLINK-1015
+    start_s: 10
+    duration_s: 80
+    rate_pps: 0.3
+    packet_size_bytes: 512
