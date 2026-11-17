@@ -197,3 +197,9 @@ TLE → Satrec → sgp4(jd,fr) TEME → teme_to_ecef(GMST) → ECEF km
 - Queue policy unchanged (DATA only). OLSR not throttled.
 - One-factor sensitivity harness. 73 tests. See `docs/PHASE6.md`.
 
+## Phase 7 status (2026-11-18)
+
+- `data_bytes_delivered` and `goodput_bps` in run summaries; mean hops already tracked.
+- Practical predictive: range-rate clamp (±50 km/s) and milder preference for closing links.
+- `scenarios/walker_compare.yaml` for multi-protocol comparisons (synthetic).
+- See `docs/PHASE7.md`.
