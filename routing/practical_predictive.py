@@ -90,15 +90,17 @@ class PracticalPredictiveProtocol(RoutingProtocol):
         for key, dist in new_ranges.items():
             lifetime = self.horizon_s  # default: assume stable
             if dt > 1e-6 and key in self._prev_range:
-                # Positive range-rate → opening; estimate time to max_range
+                # Positive range-rate → opening; estimate time to max_range.
+                # Clamp rate so a single noisy snapshot cannot drive lifetime to 0.
                 dr = dist - self._prev_range[key]
                 rate = dr / dt  # km/s
+                rate = max(-50.0, min(50.0, rate))  # ~50 km/s is extreme for LEO ISL
                 if rate > 1e-6:
                     remaining_km = max(0.0, self.max_range_km - dist)
                     lifetime = remaining_km / rate
                 elif rate < -1e-6:
-                    # Closing: still valid for at least horizon
-                    lifetime = self.horizon_s * 2.0
+                    # Closing: still usable; give mild preference over opening links
+                    lifetime = self.horizon_s * 1.5
                 else:
                     lifetime = self.horizon_s
 
