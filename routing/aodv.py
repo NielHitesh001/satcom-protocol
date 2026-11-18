@@ -44,6 +44,7 @@ class AODVProtocol(RoutingProtocol):
         nodes: List[str],
         route_timeout_s: float = 60.0,
         rreq_retries: int = 2,
+        rreq_retry_timeout_s: float = 5.0,
         net_diameter: int = 15,
         buffer_limit: int = 32,
         allow_intermediate_rrep: bool = True,
@@ -51,7 +52,8 @@ class AODVProtocol(RoutingProtocol):
     ):
         super().__init__(nodes, size_model=size_model)
         self.route_timeout_s = route_timeout_s
-        self.rreq_retries = rreq_retries
+        self.rreq_retries = max(0, rreq_retries)
+        self.rreq_retry_timeout_s = max(0.001, rreq_retry_timeout_s)
         self.net_diameter = net_diameter
         self.buffer_limit = buffer_limit
         self.allow_intermediate_rrep = allow_intermediate_rrep
@@ -61,6 +63,8 @@ class AODVProtocol(RoutingProtocol):
         self.rreq_id: Dict[str, int] = {n: 0 for n in nodes}
         self.seen_rreq: Dict[str, Set[Tuple[str, int]]] = {n: set() for n in nodes}
         self.pending: Dict[str, Dict[str, float]] = {n: {} for n in nodes}
+        # Number of retransmissions after the initial RREQ for each discovery.
+        self.discovery_retries: Dict[str, Dict[str, int]] = {n: {} for n in nodes}
         self.neighbors: Dict[str, Set[str]] = {n: set() for n in nodes}
         self.buffer: Dict[str, Dict[str, List[Packet]]] = {
             n: defaultdict(list) for n in nodes
@@ -177,9 +181,33 @@ class AODVProtocol(RoutingProtocol):
             buf.append(packet)
         if packet.dst not in self.pending[node]:
             self.pending[node][packet.dst] = time_s
+            self.discovery_retries[node][packet.dst] = 0
             self.record_event(time_s, "discovery_start", node, packet.dst)
             self._emit_rreq(time_s, node, packet.dst)
         return None
+
+    def retry_discovery(self, time_s: float, node: str, dest: str) -> List[Packet]:
+        """Retry an unresolved discovery or fail its buffered DATA deterministically.
+
+        The initial RREQ is emitted by :meth:`_handle_data`.  ``rreq_retries``
+        therefore counts additional RREQ transmissions, avoiding an unbounded
+        pending buffer when the destination is unreachable or every RREP is
+        lost.  The engine owns the returned DATA packets and records their
+        terminal drops.
+        """
+        if dest not in self.pending[node]:
+            return []
+        retries = self.discovery_retries[node].get(dest, 0)
+        if retries < self.rreq_retries:
+            self.discovery_retries[node][dest] = retries + 1
+            self._emit_rreq(time_s, node, dest)
+            return []
+
+        buffered = self.buffer[node].pop(dest, [])
+        self.pending[node].pop(dest, None)
+        self.discovery_retries[node].pop(dest, None)
+        self.record_event(time_s, "route_fail", node, dest, "RREQ retry budget exhausted")
+        return buffered
 
     def _emit_rreq(self, time_s: float, origin: str, dest: str) -> None:
         self.seq_no[origin] += 1
@@ -335,6 +363,7 @@ class AODVProtocol(RoutingProtocol):
 
         if node == p["origin"]:
             self.pending[node].pop(dest, None)
+            self.discovery_retries[node].pop(dest, None)
             self.record_event(time_s, "discovery_end", node, dest, "route installed")
             buffered = self.buffer[node].pop(dest, [])
             nh = self.next_hop(node, dest, time_s)

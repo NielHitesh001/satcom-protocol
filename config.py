@@ -20,6 +20,7 @@ A validated Scenario dataclass used by the rest of the simulator.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -76,10 +77,12 @@ class Scenario:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Scenario":
+        if not isinstance(d, dict):
+            raise ValueError("Scenario root must be a mapping")
         sites = [GroundSite(**s) for s in d.get("ground_sites", [])]
         flows = [TrafficFlow(**f) for f in d.get("traffic", [])]
         link = LinkParams(**d.get("link", {}))
-        return cls(
+        scenario = cls(
             name=d.get("name", "unnamed"),
             start_time_utc=d["start_time_utc"],
             duration_s=float(d["duration_s"]),
@@ -95,6 +98,56 @@ class Scenario:
             max_sats=d.get("max_sats", 50),
             control_sizes=d.get("control_sizes"),
         )
+        scenario.validate()
+        return scenario
+
+    def validate(self) -> None:
+        """Reject values that would make event timing or metrics ambiguous."""
+        if not self.name.strip():
+            raise ValueError("name must be non-empty")
+        if not self.start_time_utc.strip():
+            raise ValueError("start_time_utc must be non-empty")
+        if not self.tle_path.strip():
+            raise ValueError("tle_path must be non-empty")
+        if not math.isfinite(self.duration_s) or self.duration_s < 0:
+            raise ValueError("duration_s must be finite and non-negative")
+        if not math.isfinite(self.time_step_s) or self.time_step_s <= 0:
+            raise ValueError("time_step_s must be finite and positive")
+        if self.protocol not in {"aodv", "olsr", "predictive", "oracle", "practical_predictive"}:
+            raise ValueError(f"Unsupported protocol: {self.protocol!r}")
+        if self.max_sats is not None and self.max_sats <= 0:
+            raise ValueError("max_sats must be positive when provided")
+
+        if not math.isfinite(self.link.max_range_km) or self.link.max_range_km <= 0:
+            raise ValueError("link.max_range_km must be finite and positive")
+        if not math.isfinite(self.link.min_elevation_deg) or not -90 <= self.link.min_elevation_deg <= 90:
+            raise ValueError("link.min_elevation_deg must be finite and within [-90, 90]")
+        if not math.isfinite(self.link.capacity_mbps) or self.link.capacity_mbps <= 0:
+            raise ValueError("link.capacity_mbps must be finite and positive")
+        if not math.isfinite(self.link.loss_prob) or not 0 <= self.link.loss_prob <= 1:
+            raise ValueError("link.loss_prob must be finite and within [0, 1]")
+        if self.link.queue_limit < 0:
+            raise ValueError("link.queue_limit must be non-negative")
+
+        site_names = [site.name for site in self.ground_sites]
+        if any(not name.strip() for name in site_names) or len(site_names) != len(set(site_names)):
+            raise ValueError("ground site names must be non-empty and unique")
+        flow_ids = [flow.flow_id for flow in self.traffic]
+        if any(not flow_id.strip() for flow_id in flow_ids) or len(flow_ids) != len(set(flow_ids)):
+            raise ValueError("traffic flow_id values must be non-empty and unique")
+        for flow in self.traffic:
+            if not flow.source.strip() or not flow.destination.strip():
+                raise ValueError(f"flow {flow.flow_id!r} requires non-empty source and destination")
+            if flow.source == flow.destination:
+                raise ValueError(f"flow {flow.flow_id!r} source and destination must differ")
+            if not math.isfinite(flow.start_s) or flow.start_s < 0:
+                raise ValueError(f"flow {flow.flow_id!r} start_s must be finite and non-negative")
+            if not math.isfinite(flow.duration_s) or flow.duration_s < 0:
+                raise ValueError(f"flow {flow.flow_id!r} duration_s must be finite and non-negative")
+            if not math.isfinite(flow.rate_pps) or flow.rate_pps <= 0:
+                raise ValueError(f"flow {flow.flow_id!r} rate_pps must be finite and positive")
+            if flow.packet_size_bytes <= 0:
+                raise ValueError(f"flow {flow.flow_id!r} packet_size_bytes must be positive")
 
 
 def load_scenario(path: str | Path) -> Scenario:

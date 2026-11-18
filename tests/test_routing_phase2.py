@@ -183,6 +183,32 @@ def test_aodv_rerr_propagation():
     assert proto.next_hop("A", "C", 1.0) is None
 
 
+def test_aodv_discovery_retries_are_bounded_and_fail_buffered_data():
+    proto = AODVProtocol(NODES, rreq_retries=1, rreq_retry_timeout_s=2.0)
+    data = Packet(
+        pkt_id=21,
+        src="A",
+        dst="C",
+        type=PacketType.DATA,
+        size_bytes=128,
+        creation_time_s=0.0,
+        path=["A"],
+    )
+    assert proto.on_packet(0.0, "A", data) is None
+    assert proto.discovery_retries["A"]["C"] == 0
+    proto.pop_outbound()  # Initial RREQ
+
+    assert proto.retry_discovery(2.0, "A", "C") == []
+    assert proto.discovery_retries["A"]["C"] == 1
+    assert len(proto.pop_outbound()) == 1  # One bounded retry
+
+    failed = proto.retry_discovery(4.0, "A", "C")
+    assert failed == [data]
+    assert "C" not in proto.pending["A"]
+    assert "C" not in proto.buffer["A"]
+    assert any(e.event_type == "route_fail" for e in proto.route_events)
+
+
 # ---------------------------------------------------------------------------
 # OLSR topology expiry
 # ---------------------------------------------------------------------------

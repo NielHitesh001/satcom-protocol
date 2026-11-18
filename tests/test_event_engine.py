@@ -395,6 +395,34 @@ def test_accounting_invariant_olsr(tmp_path):
         assert f.sent == f.delivered + f.dropped + f.residual
 
 
+def test_aodv_failed_discovery_drops_buffered_data_after_retry_budget(tmp_path):
+    """An unreachable destination must not leave DATA buffered until termination."""
+    path = _write_scenario(
+        tmp_path,
+        protocol="aodv",
+        duration_s=20,
+        time_step_s=10,
+        link={"max_range_km": 1.0, "loss_prob": 0.0},
+        traffic=[
+            {
+                "flow_id": "f1",
+                "source": "STARLINK-1007",
+                "destination": "STARLINK-1010",
+                "start_s": 1,
+                "duration_s": 1,
+                "rate_pps": 1.0,
+                "packet_size_bytes": 256,
+            }
+        ],
+    )
+    m = run_scenario(path, output_dir=tmp_path / "aodv_timeout")
+    flow = m.flows["f1"]
+    assert flow.sent == 1
+    assert flow.delivered == 0
+    assert flow.dropped == 1
+    assert flow.residual == 0
+
+
 # ---------------------------------------------------------------------------
 # F. Simulation termination
 # ---------------------------------------------------------------------------
